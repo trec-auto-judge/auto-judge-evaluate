@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autojudge-evaluate"
+version = "0.1.0"
+description = "Evaluation tools for TREC AutoJudge: meta-evaluate, qrel-evaluate, leaderboard statistics"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "TREC AutoJudge Team"}
+]
+keywords = ["trec", "autojudge", "evaluation", "ir", "correlation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "autojudge-base",
+    "click>=8.0",
+    "pandas>=2.0",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "krippendorff",
+    "matplotlib",
+    "pyyaml>=6.0",
+    "tira>=0.0.192",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "approvaltests>=16.0.0",
+]
+
+[project.scripts]
+auto-judge-evaluate = "autojudge_evaluate:main"
+
+[project.urls]
+Homepage = "https://github.com/trec-autojudge/auto-judge-evaluate"
+Repository = "https://github.com/trec-autojudge/auto-judge-evaluate"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

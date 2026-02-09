@@ -1,0 +1,37 @@
+# Example judges.yml — maps eval filenames to display names and categories.
+#
+# Categories (everything except 'name') drive plot styling via the styles section.
+#
+# Usage:
+#   python -m autojudge_evaluate.analysis.correlation_table \
+#       -d ragtime:correlations.jsonl \
+#       --judges judges.yml
+
+# Optional: map category values to colors and hatch patterns for plots.
+# Colors: any matplotlib color string (hex, named, or gray level).
+# Hatches: matplotlib hatch characters ("//", "..", "xx", "\\", "++", "||", etc).
+#          Empty string "" means no hatch. Values are combined across categories.
+styles:
+  colors:
+    pointwise: "#4A90D9"
+    pairwise:  "#D94A4A"
+  hatches:
+    gpt-4o:    ""
+    llama-3:   "//"
+
+judges:
+
+  my-system-A.eval:
+    name: System A
+    method: pointwise
+    model: gpt-4o
+
+  my-system-B.eval:
+    name: System B
+    method: pairwise
+    model: gpt-4o
+
+  my-system-C.eval:
+    name: System C
+    method: pairwise
+    model: llama-3
