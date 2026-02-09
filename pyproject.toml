@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autojudge-evaluate"
-version = "0.3.0"
+version = "0.3.1"
 description = "Evaluation tools for TREC AutoJudge: meta-evaluate, qrel-evaluate, leaderboard statistics"
 readme = "README.md"
 license = {text = "MIT"}
