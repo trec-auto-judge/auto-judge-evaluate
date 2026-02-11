@@ -161,7 +161,14 @@ class LeaderboardEvaluator():
                 # Fill all runs with 0.0
                 return {run_id: 0.0 for run_id in eval_result.run_ids}
             return None  # skip for warn/skip
-        return eval_result.get_aggregate_ranking(measure)
+        try:
+            return eval_result.get_aggregate_ranking(measure)
+        except ValueError:
+            # Measure exists in per-topic rows but not in aggregate rows
+            self._handle_missing(f"Measure '{measure}' not found in aggregate rows")
+            if self.on_missing == "default":
+                return {run_id: 0.0 for run_id in eval_result.run_ids}
+            return None
 
     def get_measure_pairs(
         self, eval_result: EvalResult

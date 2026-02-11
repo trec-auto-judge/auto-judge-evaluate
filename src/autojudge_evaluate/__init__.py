@@ -17,6 +17,7 @@ from ._commands._meta_evaluate import meta_evaluate
 from ._commands._leaderboard import leaderboard
 from ._commands._eval_result import eval_result
 from ._commands._qrel_evaluate import qrel_evaluate
+from .analysis.correlation_table import main as analysis
 
 
 @group()
@@ -28,3 +29,4 @@ main.command("meta-evaluate")(meta_evaluate)
 main.command("leaderboard")(leaderboard)
 main.add_command(eval_result)
 main.add_command(qrel_evaluate, "qrel-evaluate")
+main.add_command(analysis, "analysis")

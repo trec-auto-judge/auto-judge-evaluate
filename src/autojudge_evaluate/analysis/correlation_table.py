@@ -687,9 +687,13 @@ def plot_correlation_consistency(
     plot_dir: Path,
     color_map: dict[str, str] | None = None,
     hatch_map: dict[str, str] | None = None,
+    all_datasets: bool = False,
 ):
-    """One plot per (Dataset, TruthMeasure, EvalMeasure)."""
-    group_keys = [c for c in ["Dataset", "TruthMeasure", "EvalMeasure"] if c in df.columns]
+    """One plot per (Dataset, TruthMeasure, EvalMeasure), or per (TruthMeasure, EvalMeasure) if all_datasets."""
+    if all_datasets and "Dataset" in df.columns:
+        group_keys = [c for c in ["TruthMeasure", "EvalMeasure"] if c in df.columns]
+    else:
+        group_keys = [c for c in ["Dataset", "TruthMeasure", "EvalMeasure"] if c in df.columns]
 
     for group_vals, group_df in df.groupby(group_keys, sort=True):
         if not isinstance(group_vals, tuple):
@@ -698,9 +702,31 @@ def plot_correlation_consistency(
         title = ", ".join(label_parts)
         slug = _slugify("_".join(str(v) for v in group_vals))
 
-        avail = [c for c in metric_cols if c in group_df.columns]
-        plot_grouped_bar(group_df, avail, "Judge", title, plot_dir / f"{slug}.pdf",
-                         color_map=color_map, hatch_map=hatch_map)
+        if all_datasets and "Dataset" in group_df.columns:
+            # Prefix metric columns with dataset name
+            datasets = sorted(group_df["Dataset"].unique())
+            merged = None
+            meta = get_meta_columns(group_df)
+            row_id_cols = [c for c in meta if c not in ["Dataset", "TruthMeasure", "EvalMeasure"]]
+
+            for ds in datasets:
+                ds_df = group_df[group_df["Dataset"] == ds][row_id_cols + metric_cols].copy()
+                ds_df = ds_df.rename(columns={m: f"{ds}\n{m}" for m in metric_cols if m in ds_df.columns})
+                if merged is None:
+                    merged = ds_df
+                else:
+                    merged = merged.merge(ds_df, on=row_id_cols, how="outer")
+
+            if merged is None:
+                continue
+            avail = [c for c in merged.columns if c not in row_id_cols]
+            slug = _slugify("all_" + "_".join(str(v) for v in group_vals))
+            plot_grouped_bar(merged, avail, "Judge", title, plot_dir / f"{slug}.pdf",
+                             color_map=color_map, hatch_map=hatch_map)
+        else:
+            avail = [c for c in metric_cols if c in group_df.columns]
+            plot_grouped_bar(group_df, avail, "Judge", title, plot_dir / f"{slug}.pdf",
+                             color_map=color_map, hatch_map=hatch_map)
 
 
 def plot_measures_as_columns(
@@ -709,17 +735,21 @@ def plot_measures_as_columns(
     plot_dir: Path,
     color_map: dict[str, str] | None = None,
     hatch_map: dict[str, str] | None = None,
+    all_datasets: bool = False,
 ):
-    """One plot per (Dataset, correlation metric)."""
+    """One plot per (Dataset, correlation metric), or per metric if all_datasets."""
     dataset_keys = ["Dataset"] if "Dataset" in df.columns else []
 
     for metric in metric_cols:
         if metric not in df.columns:
             continue
 
-        def _plot_one(sub_df: pd.DataFrame, title: str, slug: str):
+        def _plot_one(sub_df: pd.DataFrame, title: str, slug: str, include_dataset: bool = False):
             sub_df = sub_df.copy()
-            sub_df["_measure_col"] = sub_df["TruthMeasure"] + " / " + sub_df["EvalMeasure"]
+            if include_dataset and "Dataset" in sub_df.columns:
+                sub_df["_measure_col"] = sub_df["Dataset"] + "\n" + sub_df["TruthMeasure"] + "\n" + sub_df["EvalMeasure"]
+            else:
+                sub_df["_measure_col"] = sub_df["TruthMeasure"] + "\n" + sub_df["EvalMeasure"]
             meta = get_meta_columns(sub_df)
             row_id_cols = [c for c in meta if c not in ["Dataset", "TruthMeasure", "EvalMeasure", "_measure_col"]]
 
@@ -736,7 +766,11 @@ def plot_measures_as_columns(
             plot_grouped_bar(pivoted, measure_cols, "Judge", title, plot_dir / f"{slug}.pdf", ylabel=metric,
                              color_map=color_map, hatch_map=hatch_map)
 
-        if dataset_keys:
+        if all_datasets and dataset_keys:
+            title = f"Correlation={metric}"
+            slug = _slugify(f"all_{metric}")
+            _plot_one(df, title, slug, include_dataset=True)
+        elif dataset_keys:
             for dataset, ds_df in df.groupby("Dataset", sort=True):
                 title = f"Dataset={dataset}, Correlation={metric}"
                 slug = _slugify(f"{dataset}_{metric}")
@@ -788,7 +822,7 @@ def plot_measures_as_columns(
 @click.option(
     "--summary/--no-summary",
     default=False,
-    help="Produce one summary table across all datasets/measures.",
+    help="Combine all datasets into one table and one plot (dataset name prefixed to columns).",
 )
 @click.option(
     "--correlation",
@@ -906,12 +940,14 @@ def main(
         result = measures_as_columns(df, metric_cols, format, same_threshold=same, summary=summary)
         if plot_dir:
             plot_measures_as_columns(df, metric_cols, plot_dir,
-                                     color_map=color_map, hatch_map=hatch_map)
+                                     color_map=color_map, hatch_map=hatch_map,
+                                     all_datasets=summary)
     else:
         result = correlation_consistency(df, metric_cols, format, same_threshold=same, summary=summary)
         if plot_dir:
             plot_correlation_consistency(df, metric_cols, plot_dir,
-                                         color_map=color_map, hatch_map=hatch_map)
+                                         color_map=color_map, hatch_map=hatch_map,
+                                         all_datasets=summary)
 
     if plot_dir:
         click.echo(f"Plots written to {plot_dir}/", err=True)
