@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
+from itertools import product
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -41,6 +42,32 @@ def get_metric_columns(df: pd.DataFrame) -> list[str]:
     """Extract metric columns from DataFrame (everything except meta columns)."""
     meta = get_meta_columns(df)
     return [c for c in df.columns if c not in meta]
+
+
+def _escape(s: str, fmt: str) -> str:
+    """Escape special characters for the target output format."""
+    if fmt == "latex":
+        return _latex_escape(s)
+    # Markdown: escape underscores so they aren't read as emphasis
+    return str(s).replace("_", "\\_")
+
+
+def _escape_df(df: pd.DataFrame, fmt: str) -> pd.DataFrame:
+    """Escape string cell values and column names in *df* for *fmt*."""
+    out = df.copy()
+    for col in out.columns:
+        if not pd.api.types.is_numeric_dtype(out[col]):
+            out[col] = out[col].map(lambda v: _escape(str(v), fmt) if pd.notna(v) else v)
+    out.columns = [_escape(str(c), fmt) for c in out.columns]
+    return out
+
+
+def _heading(text: str, fmt: str, level: int = 4) -> str:
+    """Format a section heading: markdown ``####`` or plain text for latex."""
+    escaped = _escape(text, fmt)
+    if fmt == "latex":
+        return f"\n\n{escaped}\n"
+    return f"{'#' * level} {escaped}\n"
 
 
 class JudgesConfig:
@@ -131,17 +158,17 @@ def category_comparison(
         if cat not in df.columns:
             continue
 
-        sections.append(f"## Category: {cat}\n")
+        sections.append(_heading(f"Category: {cat}", fmt, level=2))
 
-        for group_vals, group_df in df.groupby(group_keys, sort=True):
+        for group_vals, group_df in df.groupby(group_keys, sort=True, observed=True):
             if not isinstance(group_vals, tuple):
                 group_vals = (group_vals,)
             header_parts = [f"{k}={v}" for k, v in zip(group_keys, group_vals)]
-            sections.append(f"#### {', '.join(header_parts)}\n")
+            sections.append(_heading(', '.join(header_parts), fmt))
 
             # Average metrics by category value
             avail_metrics = [m for m in metric_cols if m in group_df.columns]
-            avg_df = group_df.groupby(cat)[avail_metrics].max().reset_index()
+            avg_df = group_df.groupby(cat, observed=True)[avail_metrics].max().reset_index()
             avg_df = avg_df.rename(columns={cat: cat.title()})
 
             sections.append(format_table(
@@ -151,6 +178,101 @@ def category_comparison(
             sections.append("")
 
     return "\n".join(sections)
+
+
+def category_wilcoxon(
+    df: pd.DataFrame,
+    judges: dict[str, dict],
+    metric_cols: list[str],
+    fmt: str = "github",
+) -> str:
+    """Wilcoxon signed-rank test comparing category values across matched conditions.
+
+    For each category dimension (e.g., 'graded'), pairs judges that differ only
+    in that dimension, merges on condition columns (Dataset, TruthMeasure,
+    EvalMeasure), and runs Wilcoxon signed-rank tests on each metric.
+    """
+    from itertools import combinations
+    from scipy.stats import wilcoxon
+
+    # Discover category dimensions from judges config
+    all_categories = sorted(
+        {k for info in judges.values() for k in info if k != "name"}
+    )
+    cat_cols = [c for c in all_categories if c in df.columns]
+    if not cat_cols:
+        return ""
+
+    condition_cols = [c for c in ["Dataset", "TruthMeasure", "EvalMeasure"] if c in df.columns]
+    rows = []
+
+    for tested_cat in cat_cols:
+        other_cats = [c for c in cat_cols if c != tested_cat]
+        # Group judges by their "other category" values to find matched sets
+        judge_cat_vals = {}
+        for j, info in judges.items():
+            name = info.get("name", j)
+            key = tuple(info.get(c, "") for c in other_cats) if other_cats else ()
+            judge_cat_vals.setdefault(key, []).append((name, info.get(tested_cat, "")))
+
+        # For each matched group, collect paired observations per (cat_a, cat_b) pair
+        pair_diffs: dict[tuple[str, str], dict[str, list[float]]] = {}
+
+        for _, members in judge_cat_vals.items():
+            # Get distinct category values in this group
+            val_to_judges = {}
+            for name, val in members:
+                val_to_judges.setdefault(val, []).append(name)
+
+            vals = sorted(val_to_judges.keys())
+            if len(vals) < 2:
+                continue
+
+            for va, vb in combinations(vals, 2):
+                pair_key = (va, vb)
+                if pair_key not in pair_diffs:
+                    pair_diffs[pair_key] = {m: [] for m in metric_cols}
+
+                for ja in val_to_judges[va]:
+                    for jb in val_to_judges[vb]:
+                        da = df[df["Judge"] == ja]
+                        db = df[df["Judge"] == jb]
+                        merged = da.merge(db, on=condition_cols, suffixes=("_a", "_b"))
+                        for m in metric_cols:
+                            ca, cb = f"{m}_a", f"{m}_b"
+                            if ca in merged.columns and cb in merged.columns:
+                                diffs = (merged[ca] - merged[cb]).dropna()
+                                pair_diffs[pair_key][m].extend(diffs.tolist())
+
+        for (va, vb), metrics_diffs in sorted(pair_diffs.items()):
+            for m, diffs in metrics_diffs.items():
+                diffs_arr = np.array(diffs)
+                # Need at least 6 non-zero differences for a meaningful test
+                nonzero = diffs_arr[diffs_arr != 0]
+                if len(nonzero) < 6:
+                    continue
+                _, p = wilcoxon(diffs_arr)
+                med = float(np.median(diffs_arr))
+                winner = va if med > 0 else vb if med < 0 else "tie"
+                rows.append({
+                    "Category": tested_cat,
+                    "Comparison": f"{va} vs {vb}",
+                    "Metric": m,
+                    "N": len(diffs_arr),
+                    "median_diff": f"{med:+.4f}",
+                    "p-value": f"{p:.4f}" if p >= 0.0001 else f"{p:.2e}",
+                    "winner": winner,
+                    "sig": "*" if p < 0.05 else "",
+                })
+
+    if not rows:
+        print("Wilcoxon: no matched pairs found")
+        return "\n"
+
+    result_df = _escape_df(pd.DataFrame(rows), fmt)
+    if fmt == "latex":
+        return "\n" + _heading("Category Wilcoxon Test", fmt=fmt, level=1) + result_df.to_latex(index=False, escape=False) + "\n"
+    return result_df.to_markdown(index=False) + "\n"
 
 
 def load_dataset(path: Path, label: str) -> pd.DataFrame:
@@ -177,6 +299,62 @@ def load_datasets(dataset_specs: Sequence[str]) -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True)
 
 
+def _make_ordered_concat(df: pd.DataFrame, columns: list[str], sep: str = " / ") -> pd.Series:
+    """Concatenate columns into a single string column, preserving categorical order.
+
+    If the component columns are ordered categoricals, the result is an ordered
+    categorical whose categories follow the cross-product order of the inputs
+    (first column varies slowest).  Otherwise falls back to first-appearance order.
+    """
+    result = df[columns[0]].astype(str)
+    for col in columns[1:]:
+        result = result + sep + df[col].astype(str)
+
+    # Build ordered categories from cross-product of component categoricals
+    cat_lists = []
+    for col in columns:
+        s = df[col]
+        if hasattr(s, "cat") and s.cat.ordered:
+            cat_lists.append(list(s.cat.categories))
+        else:
+            cat_lists.append(list(dict.fromkeys(s)))
+    ordered = [sep.join(str(v) for v in combo) for combo in product(*cat_lists)]
+    # Only keep categories actually present
+    present = set(result)
+    ordered = [c for c in ordered if c in present]
+    return pd.Categorical(result, categories=ordered, ordered=True)
+
+
+def _dataset_label(spec: str) -> str:
+    """Extract dataset label from a 'label:path' or 'path' spec."""
+    if ":" in spec:
+        return spec.split(":", 1)[0]
+    return Path(spec).stem
+
+
+def _set_categorical_order(df: pd.DataFrame, column: str, cli_values: Sequence[str]) -> None:
+    """Set column to ordered Categorical preserving CLI order.
+
+    If cli_values is empty/None, uses the order of first appearance in df.
+    For "Dataset", extracts labels from 'label:path' specs.
+    """
+    if column not in df.columns:
+        return
+    if cli_values:
+        if column == "Dataset":
+            ordered = list(dict.fromkeys(_dataset_label(s) for s in cli_values))
+        else:
+            ordered = list(dict.fromkeys(cli_values))
+    else:
+        # Preserve first-appearance order from the dataframe
+        ordered = list(dict.fromkeys(df[column]))
+    # Include any values present in df but not in ordered (append at end)
+    for val in df[column].unique():
+        if val not in ordered:
+            ordered.append(val)
+    df[column] = pd.Categorical(df[column], categories=ordered, ordered=True)
+
+
 def aggregate_by_judge(
     df: pd.DataFrame,
     metrics: Optional[Sequence[str]] = None,
@@ -192,7 +370,7 @@ def aggregate_by_judge(
     available = [m for m in metrics if m in df.columns]
 
     group_cols = ["Judge", "TruthMeasure", "EvalMeasure"]
-    return df.groupby(group_cols)[available].mean().reset_index()
+    return df.groupby(group_cols, observed=True)[available].mean().reset_index()
 
 
 
@@ -348,8 +526,11 @@ def format_table(
             df, metric_cols or [], same_threshold=same_threshold,
             highlight_max=highlight_max, float_format=float_format,
         )
+    df = _escape_df(df, fmt)
     if highlight_max and metric_cols:
-        df = bold_max(df, metric_cols, fmt, same_threshold)
+        # Remap metric_cols to escaped names
+        esc_metrics = [_escape(c, fmt) for c in metric_cols]
+        df = bold_max(df, esc_metrics, fmt, same_threshold)
         # Already string-formatted, don't apply floatfmt
         return df.to_markdown(index=False, tablefmt=fmt)
     return df.to_markdown(index=False, tablefmt=fmt, floatfmt=float_format)
@@ -372,9 +553,9 @@ def correlation_consistency(
         # One wide table: pivot Dataset/TruthMeasure/EvalMeasure into column prefixes
         df = df.copy()
         if "Dataset" in df.columns:
-            df["_group"] = df["Dataset"] + " / " + df["TruthMeasure"] + " / " + df["EvalMeasure"]
+            df["_group"] = _make_ordered_concat(df, ["Dataset", "TruthMeasure", "EvalMeasure"])
         else:
-            df["_group"] = df["TruthMeasure"] + " / " + df["EvalMeasure"]
+            df["_group"] = _make_ordered_concat(df, ["TruthMeasure", "EvalMeasure"])
 
         meta = get_meta_columns(df)
         row_id_cols = [c for c in meta if c not in ["Dataset", "TruthMeasure", "EvalMeasure", "_group"]]
@@ -386,6 +567,7 @@ def correlation_consistency(
                 continue
             piv = df.pivot_table(
                 index=row_id_cols, columns="_group", values=metric, aggfunc="first",
+                observed=True,
             )
             # Prefix columns with metric name
             piv.columns = [f"{g} / {metric}" for g in piv.columns]
@@ -410,11 +592,11 @@ def correlation_consistency(
     sections = []
     group_keys = [c for c in ["Dataset", "TruthMeasure", "EvalMeasure"] if c in df.columns]
 
-    for group_vals, group_df in df.groupby(group_keys, sort=True):
+    for group_vals, group_df in df.groupby(group_keys, sort=True, observed=True):
         if not isinstance(group_vals, tuple):
             group_vals = (group_vals,)
         header_parts = [f"{k}={v}" for k, v in zip(group_keys, group_vals)]
-        sections.append(f"#### {', '.join(header_parts)}\n")
+        sections.append(_heading(', '.join(header_parts), fmt))
 
         # Select row-header cols (categories + Judge) + metric columns
         meta = get_meta_columns(group_df)
@@ -450,16 +632,16 @@ def measures_as_columns(
 
         if summary:
             # One wide table: Dataset / TruthMeasure / EvalMeasure as columns
-            sections.append(f"#### Correlation={metric}\n")
+            sections.append(_heading(f"Correlation={metric}", fmt))
             sections.append(_pivot_measures_table(df, metric, fmt, same_threshold, include_dataset=True))
             sections.append("")
         elif dataset_keys:
-            for dataset, ds_df in df.groupby("Dataset", sort=True):
-                sections.append(f"#### Dataset={dataset}, Correlation={metric}\n")
+            for dataset, ds_df in df.groupby("Dataset", sort=True, observed=True):
+                sections.append(_heading(f"Dataset={dataset}, Correlation={metric}", fmt))
                 sections.append(_pivot_measures_table(ds_df, metric, fmt, same_threshold))
                 sections.append("")
         else:
-            sections.append(f"#### Correlation={metric}\n")
+            sections.append(_heading(f"Correlation={metric}", fmt))
             sections.append(_pivot_measures_table(df, metric, fmt, same_threshold))
             sections.append("")
 
@@ -477,20 +659,21 @@ def _pivot_measures_table(
     # Create composite column name
     df = df.copy()
     if include_dataset and "Dataset" in df.columns:
-        df["_measure_col"] = df["Dataset"] + " / " + df["TruthMeasure"] + " / " + df["EvalMeasure"]
+        df["_measure_col"] = _make_ordered_concat(df, ["Dataset", "TruthMeasure", "EvalMeasure"])
     else:
-        df["_measure_col"] = df["TruthMeasure"] + " / " + df["EvalMeasure"]
+        df["_measure_col"] = _make_ordered_concat(df, ["TruthMeasure", "EvalMeasure"])
 
     # Get row identity columns (Judge + any category cols)
     meta = get_meta_columns(df)
     row_id_cols = [c for c in meta if c not in ["Dataset", "TruthMeasure", "EvalMeasure", "_measure_col"]]
 
-    # Pivot
+    # Pivot — use observed=True to respect categorical order
     pivoted = df.pivot_table(
         index=row_id_cols,
         columns="_measure_col",
         values=metric,
         aggfunc="first",
+        observed=True,
     ).reset_index()
 
     # Flatten MultiIndex columns if needed
@@ -579,7 +762,7 @@ def _setup_plot_style():
     matplotlib.use("pdf")
     plt.rcParams.update({
         "font.family": "sans-serif",
-        "font.size": 9,
+        "font.size": 6,
         "axes.linewidth": 0,
         "axes.axisbelow": True,
         "axes.grid": False,
@@ -589,14 +772,14 @@ def _setup_plot_style():
         "axes.spines.right": False,
         "axes.spines.left": False,
         "axes.spines.bottom": False,
-        "legend.fontsize": 8,
+        "legend.fontsize": 6,
         "legend.frameon": False,
         "xtick.major.size": 0,
         "ytick.major.size": 0,
-        "xtick.color": "0.4",
-        "ytick.color": "0.4",
-        "text.color": "0.3",
-        "axes.labelcolor": "0.3",
+        "xtick.color": "0.0",
+        "ytick.color": "0.0",
+        "text.color": "0.0",
+        "axes.labelcolor": "0.0",
         "figure.dpi": 300,
         "figure.facecolor": "white",
     })
@@ -631,18 +814,19 @@ def plot_grouped_bar(
     n_groups = len(group_cols)
 
     x = np.arange(n_groups)
-    total_width = 0.75
+    total_width = 0.85
     bar_width = total_width / n_series
 
-    fig, ax = plt.subplots(figsize=(max(5, n_groups * 1.5), 3.2))
+    # fig, ax = plt.subplots(figsize=(max(5, n_groups * 1.5), 3.2))
+    fig, ax = plt.subplots(figsize=(max(5, n_groups * 1.5), 1.5))
 
     for i, (_, row) in enumerate(df.iterrows()):
         judge = row[series_col]
         color, hatch = style_map.get(judge, ("#999999", ""))
         values = [row[c] for c in group_cols]
         offset = (i - n_series / 2 + 0.5) * bar_width
-        edge = ("white" if _is_dark(color) else "0.3") if hatch else color
-        ax.bar(
+        edge = ("#E0E0E0" if _is_dark(color) else "#232323" ) if hatch else color
+        bars = ax.bar(
             x + offset, values, bar_width * 0.75,
             color=color,
             hatch=hatch,
@@ -650,25 +834,34 @@ def plot_grouped_bar(
             linewidth=0.3,
             label=judge,
         )
+        for bar, v in zip(bars, values):
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                continue
+            label_y = max(v, 0.0)
+            ax.text(bar.get_x() + bar.get_width() / 2, label_y + 0.01,
+                    f"{v:.2f}", ha="center", va="bottom", fontsize=6,
+                    color="0.0", rotation=90)
 
     # Y-axis: light horizontal grid lines, ticks at 0.25 intervals
     ax.set_yticks([0, 0.25, 0.50, 0.75, 1.00])
     ax.yaxis.grid(True, color="0.85", linewidth=0.5)
     ax.xaxis.grid(False)
-    ax.set_ylim(0, 1.05)
+    ax.set_ylim(0, 1.15)
 
     # X-axis
     ax.set_xticks(x)
-    ax.set_xticklabels(group_cols, rotation=0, ha="center", fontsize=8, color="0.4")
-
+    ax.set_xticklabels(group_cols, rotation=0, ha="center", fontsize=6, color="0.0")
+    # ax.set_xlim(-0.5, len(df.columns) - 0.5)
+    
     # Labels and title
-    ax.set_ylabel(ylabel, fontsize=9, color="0.4")
-    ax.set_title(title, fontsize=10, color="0.3", loc="left", pad=10)
+    ax.set_ylabel(ylabel, fontsize=6, color="0.0")
+    # ax.set_title(title, fontsize=6, color="0.3", loc="left", pad=10)
 
-    # Legend outside right, no frame
+    # Legend above plot, wrapping into multiple rows via ncol
     ax.legend(
-        loc="upper left", bbox_to_anchor=(1.01, 1), borderaxespad=0,
-        handlelength=1.2, handleheight=0.8,
+        loc="lower left", bbox_to_anchor=(0, 1.02), ncol=min(n_series, 5),
+        borderaxespad=0, handlelength=1.2, handleheight=0.8,
+        columnspacing=1.0,
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -695,7 +888,7 @@ def plot_correlation_consistency(
     else:
         group_keys = [c for c in ["Dataset", "TruthMeasure", "EvalMeasure"] if c in df.columns]
 
-    for group_vals, group_df in df.groupby(group_keys, sort=True):
+    for group_vals, group_df in df.groupby(group_keys, sort=True, observed=True):
         if not isinstance(group_vals, tuple):
             group_vals = (group_vals,)
         label_parts = [f"{k}={v}" for k, v in zip(group_keys, group_vals)]
@@ -747,14 +940,15 @@ def plot_measures_as_columns(
         def _plot_one(sub_df: pd.DataFrame, title: str, slug: str, include_dataset: bool = False):
             sub_df = sub_df.copy()
             if include_dataset and "Dataset" in sub_df.columns:
-                sub_df["_measure_col"] = sub_df["Dataset"] + "\n" + sub_df["TruthMeasure"] + "\n" + sub_df["EvalMeasure"]
+                sub_df["_measure_col"] = _make_ordered_concat(sub_df, ["Dataset", "TruthMeasure", "EvalMeasure"], sep="\n")
             else:
-                sub_df["_measure_col"] = sub_df["TruthMeasure"] + "\n" + sub_df["EvalMeasure"]
+                sub_df["_measure_col"] = _make_ordered_concat(sub_df, ["TruthMeasure", "EvalMeasure"], sep="\n")
             meta = get_meta_columns(sub_df)
             row_id_cols = [c for c in meta if c not in ["Dataset", "TruthMeasure", "EvalMeasure", "_measure_col"]]
 
             pivoted = sub_df.pivot_table(
                 index=row_id_cols, columns="_measure_col", values=metric, aggfunc="first",
+                observed=True,
             ).reset_index()
             pivoted.columns.name = None
 
@@ -771,7 +965,7 @@ def plot_measures_as_columns(
             slug = _slugify(f"all_{metric}")
             _plot_one(df, title, slug, include_dataset=True)
         elif dataset_keys:
-            for dataset, ds_df in df.groupby("Dataset", sort=True):
+            for dataset, ds_df in df.groupby("Dataset", sort=True, observed=True):
                 title = f"Dataset={dataset}, Correlation={metric}"
                 slug = _slugify(f"{dataset}_{metric}")
                 _plot_one(ds_df, title, slug)
@@ -925,6 +1119,11 @@ def main(
     if eval_measures:
         df = df[df["EvalMeasure"].isin(eval_measures)]
 
+    # Preserve CLI order for datasets, measures via ordered categoricals
+    _set_categorical_order(df, "Dataset", all_specs)
+    _set_categorical_order(df, "TruthMeasure", truth_measure)
+    _set_categorical_order(df, "EvalMeasure", eval_measures)
+
     # Select correlation metric columns
     if correlation:
         metric_cols = list(correlation)
@@ -954,8 +1153,10 @@ def main(
 
     # Append category comparison if judges YAML provides categories
     if judges_config:
-        result += "\n\n---\n\n# Category Comparison\n\n"
-        result += category_comparison(df, judges_config.judges, metric_cols, format, same_threshold=same)
+        sep = "\n\n" if format == "latex" else "\n\n---\n\n"
+        # result += sep + _heading("Category Comparison", format, level=1)
+        # result += category_comparison(df, judges_config.judges, metric_cols, format, same_threshold=same)
+        result += category_wilcoxon(df, judges_config.judges, metric_cols, fmt=format)
 
     # Output
     if output:
