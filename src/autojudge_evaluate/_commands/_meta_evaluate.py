@@ -11,6 +11,7 @@ from autojudge_base.click_plus import (
     LEADERBOARD_FORMATS,
     LEADERBOARD_FORMAT_HELP,
 )
+from autojudge_base.leaderboard import check_format_mismatch
 from autojudge_evaluate.evaluation import LeaderboardEvaluator, CorrelationMethodType
 from autojudge_evaluate.eval_results import load as load_eval_result, EvalResult
 
@@ -328,6 +329,17 @@ def meta_evaluate(
         f"Run overlap: {len(common_runs)} common, {len(truth_only_runs)} truth-only, {len(eval_only_runs)} eval-only.",
         err=True
     )
+
+    # Pre-hoc format check: warn if eval files appear to be wrong format
+    for eval_path in all_inputs:
+        warning = check_format_mismatch(
+            eval_path,
+            specified_format=eval_format,
+            known_topics=truth_topic_ids,
+            has_header=eval_has_header,
+        )
+        if warning:
+            click.echo(warning, err=True)
 
     # Report run filtering
     run_info_parts = []
