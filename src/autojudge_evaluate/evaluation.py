@@ -5,10 +5,11 @@ from pathlib import Path
 from typing import Dict, List, Literal, Tuple
 
 from autojudge_evaluate.eval_results import load as load_eval_result, EvalResult
+from autojudge_base import LeaderboardFormat
 
 # TODO: Consider unifying with leaderboard.OnMissing which uses "fix_aggregate" instead of "skip"
 OnMissing = Literal["error", "warn", "skip", "default"]
-EvalResultFormat = Literal["trec_eval", "tot", "ir_measures", "ranking", "jsonl"]
+EvalResultFormat = LeaderboardFormat
 BASE_CORRELATION_METHODS = ["kendall", "pearson", "spearman", "tauap_b"]
 TOP_K_VALUES = [10]
 CORRELATION_METHODS: List[str] = (
@@ -297,130 +298,130 @@ class LeaderboardEvaluator():
 
         return ret
 
-    def evaluate_old(
-        self,
-        eval_file: Path,
-    ) -> Dict[Tuple[str, str], Dict]:
-        """
-        [BACKUP] Old evaluate implementation.
+    # def evaluate_old(
+    #     self,
+    #     eval_file: Path,
+    # ) -> Dict[Tuple[str, str], Dict]:
+    #     """
+    #     [BACKUP] Old evaluate implementation.
 
-        Evaluate and return dict keyed by (truth_measure, eval_measure) pairs.
+    #     Evaluate and return dict keyed by (truth_measure, eval_measure) pairs.
 
-        Args:
-            eval_file: Path to the evaluated result file
+    #     Args:
+    #         eval_file: Path to the evaluated result file
 
-        Returns:
-            Dict mapping (truth_measure, eval_measure) pairs to correlation results.
-            Each method (e.g., "kendall", "kendall@10") is computed with its own
-            top-k filtering based on the @k suffix.
+    #     Returns:
+    #         Dict mapping (truth_measure, eval_measure) pairs to correlation results.
+    #         Each method (e.g., "kendall", "kendall@10") is computed with its own
+    #         top-k filtering based on the @k suffix.
 
-        Filtering order:
-            1. Filter truth and eval to common runs (intersection for fair comparison)
-            2. If topic_ids specified (--only-shared-topics): filter to those topics, recompute
-               Otherwise (--all-topics): use provided aggregates, no topic filtering
-            For kendall@k specifically:
-            3. Get top k runs from truth's aggregates
-            4. Filter eval to top k runs (and topics if specified), recompute
-            5. Filter truth to top k runs, recompute
-            6. Compare rankings
-        """
-        # =======================================================================
-        # LOAD: Raw data without filtering
-        # =======================================================================
-        truth_raw = self.truth_result  # Lazily loaded, no filtering
-        eval_raw = self._load_eval_result(
-            eval_file, self.eval_format, self.eval_has_header, self.on_missing
-        )
+    #     Filtering order:
+    #         1. Filter truth and eval to common runs (intersection for fair comparison)
+    #         2. If topic_ids specified (--only-shared-topics): filter to those topics, recompute
+    #            Otherwise (--all-topics): use provided aggregates, no topic filtering
+    #         For kendall@k specifically:
+    #         3. Get top k runs from truth's aggregates
+    #         4. Filter eval to top k runs (and topics if specified), recompute
+    #         5. Filter truth to top k runs, recompute
+    #         6. Compare rankings
+    #     """
+    #     # =======================================================================
+    #     # LOAD: Raw data without filtering
+    #     # =======================================================================
+    #     truth_raw = self.truth_result  # Lazily loaded, no filtering
+    #     eval_raw = self._load_eval_result(
+    #         eval_file, self.eval_format, self.eval_has_header, self.on_missing
+    #     )
 
-        # =======================================================================
-        # FILTER: All filtering decisions consolidated here
-        # =======================================================================
+    #     # =======================================================================
+    #     # FILTER: All filtering decisions consolidated here
+    #     # =======================================================================
 
-        # Determine what filtering is needed
-        has_top_k_methods = any("@" in m for m in self.correlation_methods)
-        needs_topic_filter = self.topic_ids is not None
-        needs_run_filter = has_top_k_methods  # @k requires filtering to common runs first
+    #     # Determine what filtering is needed
+    #     has_top_k_methods = any("@" in m for m in self.correlation_methods)
+    #     needs_topic_filter = self.topic_ids is not None
+    #     needs_run_filter = has_top_k_methods  # @k requires filtering to common runs first
 
-        # Apply drop_aggregate flags (CLI flags)
-        if self.truth_drop_aggregate:
-            truth_base = truth_raw.filter_and_recompute()  # Drop and recompute
-        else:
-            truth_base = truth_raw
+    #     # Apply drop_aggregate flags (CLI flags)
+    #     if self.truth_drop_aggregate:
+    #         truth_base = truth_raw.filter_and_recompute()  # Drop and recompute
+    #     else:
+    #         truth_base = truth_raw
 
-        if self.eval_drop_aggregate:
-            eval_base = eval_raw.filter_and_recompute()  # Drop and recompute
-        else:
-            eval_base = eval_raw
+    #     if self.eval_drop_aggregate:
+    #         eval_base = eval_raw.filter_and_recompute()  # Drop and recompute
+    #     else:
+    #         eval_base = eval_raw
 
-        # For @k methods: filter to common runs upfront
-        if needs_run_filter:
-            common_run_ids = set(truth_base.run_ids) & set(eval_base.run_ids)
-            truth_for_topk = truth_base.filter_and_recompute(
-                topic_ids=self.topic_ids,
-                run_ids=common_run_ids,
-            )
-            # Warn about measures lost during filtering
-            lost_measures = truth_base.measures - truth_for_topk.measures
-            if lost_measures:
-                print(
-                    f"Warning: {len(lost_measures)} measure(s) unavailable after filtering "
-                    f"(no per-topic data): {sorted(lost_measures)}",
-                    file=sys.stderr
-                )
-        else:
-            truth_for_topk = None  # Not needed for non-@k methods
+    #     # For @k methods: filter to common runs upfront
+    #     if needs_run_filter:
+    #         common_run_ids = set(truth_base.run_ids) & set(eval_base.run_ids)
+    #         truth_for_topk = truth_base.filter_and_recompute(
+    #             topic_ids=self.topic_ids,
+    #             run_ids=common_run_ids,
+    #         )
+    #         # Warn about measures lost during filtering
+    #         lost_measures = truth_base.measures - truth_for_topk.measures
+    #         if lost_measures:
+    #             print(
+    #                 f"Warning: {len(lost_measures)} measure(s) unavailable after filtering "
+    #                 f"(no per-topic data): {sorted(lost_measures)}",
+    #                 file=sys.stderr
+    #             )
+    #     else:
+    #         truth_for_topk = None  # Not needed for non-@k methods
 
-        # =======================================================================
-        # COMPUTE: Correlations for each measure pair and method
-        # =======================================================================
-        ret = {}
+    #     # =======================================================================
+    #     # COMPUTE: Correlations for each measure pair and method
+    #     # =======================================================================
+    #     ret = {}
 
-        for truth_m, eval_m in self.get_measure_pairs(eval_raw):
-            correlations = {}
+    #     for truth_m, eval_m in self.get_measure_pairs(eval_raw):
+    #         correlations = {}
 
-            for method in self.correlation_methods:
-                base_method, top_k = parse_correlation_method(method)
+    #         for method in self.correlation_methods:
+    #             base_method, top_k = parse_correlation_method(method)
 
-                if top_k is not None:
-                    # @k method: use pre-filtered truth_for_topk
-                    if truth_m not in truth_for_topk.measures:
-                        self._handle_missing(f"Measure '{truth_m}' not found for top-k ranking")
-                        continue
+    #             if top_k is not None:
+    #                 # @k method: use pre-filtered truth_for_topk
+    #                 if truth_m not in truth_for_topk.measures:
+    #                     self._handle_missing(f"Measure '{truth_m}' not found for top-k ranking")
+    #                     continue
 
-                    top_run_ids = set(truth_for_topk.top_k_run_ids(truth_m, top_k))
+    #                 top_run_ids = set(truth_for_topk.top_k_run_ids(truth_m, top_k))
 
-                    # Filter eval to top k runs (and topics if specified)
-                    eval_for_method = eval_base.filter_and_recompute(
-                        topic_ids=self.topic_ids,
-                        run_ids=top_run_ids
-                    )
+    #                 # Filter eval to top k runs (and topics if specified)
+    #                 eval_for_method = eval_base.filter_and_recompute(
+    #                     topic_ids=self.topic_ids,
+    #                     run_ids=top_run_ids
+    #                 )
 
-                    # Filter truth to top k runs
-                    truth_for_method = truth_for_topk.filter_and_recompute(run_ids=top_run_ids)
-                else:
-                    # Non-@k method: preserve original aggregates (v1 behavior)
-                    truth_for_method = truth_base
+    #                 # Filter truth to top k runs
+    #                 truth_for_method = truth_for_topk.filter_and_recompute(run_ids=top_run_ids)
+    #             else:
+    #                 # Non-@k method: preserve original aggregates (v1 behavior)
+    #                 truth_for_method = truth_base
 
-                    if needs_topic_filter:
-                        eval_for_method = eval_base.filter_and_recompute(
-                            topic_ids=self.topic_ids,
-                        )
-                    else:
-                        eval_for_method = eval_base
+    #                 if needs_topic_filter:
+    #                     eval_for_method = eval_base.filter_and_recompute(
+    #                         topic_ids=self.topic_ids,
+    #                     )
+    #                 else:
+    #                     eval_for_method = eval_base
 
-                truth_ranking = self.extract_ranking(truth_for_method, truth_m)
-                eval_ranking = self.extract_ranking(eval_for_method, eval_m)
+    #             truth_ranking = self.extract_ranking(truth_for_method, truth_m)
+    #             eval_ranking = self.extract_ranking(eval_for_method, eval_m)
 
-                if truth_ranking is None or eval_ranking is None:
-                    continue
+    #             if truth_ranking is None or eval_ranking is None:
+    #                 continue
 
-                correlations[method] = self._compute_single_correlation(
-                    truth_ranking, eval_ranking, base_method
-                )
+    #             correlations[method] = self._compute_single_correlation(
+    #                 truth_ranking, eval_ranking, base_method
+    #             )
 
-            ret[(truth_m, eval_m)] = correlations
+    #         ret[(truth_m, eval_m)] = correlations
 
-        return ret
+    #     return ret
 
     def _align_rankings(
         self, truth_ranking: Dict[str, float], eval_ranking: Dict[str, float]
