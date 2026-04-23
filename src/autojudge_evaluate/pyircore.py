@@ -122,7 +122,8 @@ def _tauap_b_ties(rx, ry, p):
                 c_above += 1
         c_all += c_above / p[i]  # divide by p-1 instead of i-1
     if n_not_top == 0:
-        # All elements are tied at the top rank - no meaningful ranking to compare
-        print("Warning: tauap_b cannot compute correlation when all elements are tied (returning 0.0)", file=sys.stderr)
+        # All tied — LeaderboardEvaluator.evaluate() emits one summary warning
+        # covering this and related issues; the dump (if enabled) tags the triple.
+        # print("Warning: tauap_b cannot compute correlation when all elements are tied (returning 0.0)", file=sys.stderr)
         return 0.0
     return 2 / n_not_top * c_all - 1

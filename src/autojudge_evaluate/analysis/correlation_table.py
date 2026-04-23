@@ -11,6 +11,7 @@ Usage:
         --dataset dragun:dragun.jsonl
 """
 
+import sys
 import click
 import yaml
 import numpy as np
@@ -276,10 +277,47 @@ def category_wilcoxon(
 
 
 def load_dataset(path: Path, label: str) -> pd.DataFrame:
-    """Load correlation results from JSONL file."""
-    df = pd.read_json(path, lines=True)
+    """Load correlation results from JSONL file (pandas-based, original behavior)."""
+    import json
+    rows = []
+    with path.open(encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                rows.append(json.loads(stripped))
+            except json.JSONDecodeError as e:
+                preview = stripped[:120] + ("..." if len(stripped) > 120 else "")
+                raise ValueError(
+                    f"{path}:{lineno}: invalid JSON ({e.msg} at col {e.colno}): {preview!r}"
+                ) from None
+    if not rows:
+        raise ValueError(f"{path}: no records loaded (file empty or all lines blank)")
+    df = pd.DataFrame(rows)
     df["Dataset"] = label
+
+    # Detect duplicate (Judge, TruthMeasure, EvalMeasure) rows — usually means
+    # the producing script appended (>>) instead of overwriting (>) the file.
+    dup_keys = [c for c in ("Judge", "TruthMeasure", "EvalMeasure") if c in df.columns]
+    if dup_keys:
+        dups = df.groupby(dup_keys).size()
+        dups = dups[dups > 1]
+        if not dups.empty:
+            sample = dups.head(5).to_dict()
+            print(
+                f"WARNING: {path}: {len(dups)} duplicate {tuple(dup_keys)} row(s); "
+                f"first {min(5, len(dups))}: {sample}",
+                file=sys.stderr,
+            )
+
     return df
+
+    
+    # with path.open(encoding="utf-8") as f:
+    #     df = pd.read_json(f, lines=True)
+    #     df["Dataset"] = label
+    #     return df
 
 
 def load_datasets(dataset_specs: Sequence[str]) -> pd.DataFrame:
@@ -812,6 +850,9 @@ def plot_grouped_bar(
 
     n_series = len(df)
     n_groups = len(group_cols)
+    if n_series == 0 or n_groups == 0:
+        print(f"Skipping '{out_path.name}': empty DataFrame (n_series={n_series}, n_groups={n_groups})", file=sys.stderr)
+        return
 
     x = np.arange(n_groups)
     total_width = 0.85
@@ -938,6 +979,9 @@ def plot_measures_as_columns(
             continue
 
         def _plot_one(sub_df: pd.DataFrame, title: str, slug: str, include_dataset: bool = False):
+            if sub_df.empty or metric not in sub_df.columns or sub_df[metric].dropna().empty:
+                print(f"Skipping plot '{slug}': no data for metric={metric}", file=sys.stderr)
+                return
             sub_df = sub_df.copy()
             if include_dataset and "Dataset" in sub_df.columns:
                 sub_df["_measure_col"] = _make_ordered_concat(sub_df, ["Dataset", "TruthMeasure", "EvalMeasure"], sep="\n")

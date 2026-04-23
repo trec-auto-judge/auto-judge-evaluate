@@ -4,7 +4,15 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Literal, Tuple
 
+import warnings
+
 from autojudge_evaluate.eval_results import load as load_eval_result, EvalResult
+from autojudge_evaluate.correlation_diagnostics import (
+    CorrelationIssue,
+    RankingExtractionDiagnostic,
+    diagnose_correlation,
+    format_issues_warning,
+)
 from autojudge_base import LeaderboardFormat
 
 # TODO: Consider unifying with leaderboard.OnMissing which uses "fix_aggregate" instead of "skip"
@@ -78,6 +86,7 @@ class LeaderboardEvaluator():
         topic_ids: set[str] | None = None,
         run_ids: set[str] | None = None,
         only_shared_runs: bool = False,
+        diagnostics_dir: Path | None = None,
     ):
         self.on_missing = on_missing
         self.truth_leaderboard = truth_leaderboard
@@ -93,6 +102,7 @@ class LeaderboardEvaluator():
         self.topic_ids = topic_ids  # Pre-determined topics, or None = all
         self.run_ids = run_ids  # Explicit run_ids filter, or None = all
         self.only_shared_runs = only_shared_runs  # Filter to common run_ids (truth ∩ eval)
+        self.diagnostics_dir = diagnostics_dir  # When set, dump per-method ranking JSONL
 
         # Lazy: truth_result loaded on first access
         self._truth_result: EvalResult | None = None
@@ -150,26 +160,39 @@ class LeaderboardEvaluator():
             on_missing=eval_on_missing,
         )
 
-    def extract_ranking(self, eval_result: EvalResult, measure: str) -> Dict[str, float] | None:
+    def extract_ranking(
+        self, eval_result: EvalResult, measure: str
+    ) -> Tuple[Dict[str, float] | None, RankingExtractionDiagnostic]:
         """Extract run_id -> value mapping for aggregate rows (topic_id == ALL_TOPIC_ID).
 
-        Returns None if measure is missing and on_missing is skip/warn.
-        Returns all 0.0 if measure is missing and on_missing is default.
+        Returns:
+          (None, diag)             — measure missing and on_missing is skip/warn;
+                                     caller should skip this (truth_m, eval_m) pair.
+          (all-0.0 dict, diag with defaulted=True)
+                                   — measure missing and on_missing is default.
+          (ranking, diag)          — normal path (defaulted=False).
+
+        The diagnostic is consumed by the dump step to flag downstream issues.
         """
         if measure not in eval_result.measures:
             self._handle_missing(f"Measure '{measure}' not found in result")
             if self.on_missing == "default":
-                # Fill all runs with 0.0
-                return {run_id: 0.0 for run_id in eval_result.run_ids}
-            return None  # skip for warn/skip
+                return (
+                    {run_id: 0.0 for run_id in eval_result.run_ids},
+                    RankingExtractionDiagnostic(defaulted=True),
+                )
+            return None, RankingExtractionDiagnostic()
         try:
-            return eval_result.get_aggregate_ranking(measure)
+            return eval_result.get_aggregate_ranking(measure), RankingExtractionDiagnostic()
         except ValueError:
             # Measure exists in per-topic rows but not in aggregate rows
             self._handle_missing(f"Measure '{measure}' not found in aggregate rows")
             if self.on_missing == "default":
-                return {run_id: 0.0 for run_id in eval_result.run_ids}
-            return None
+                return (
+                    {run_id: 0.0 for run_id in eval_result.run_ids},
+                    RankingExtractionDiagnostic(defaulted=True),
+                )
+            return None, RankingExtractionDiagnostic()
 
     def get_measure_pairs(
         self, eval_result: EvalResult
@@ -269,6 +292,7 @@ class LeaderboardEvaluator():
         # COMPUTE: Correlations for each measure pair and method
         # =======================================================================
         ret = {}
+        issues: List[Tuple[str, str, str, CorrelationIssue]] = []
 
         for truth_m, eval_m in self.get_measure_pairs(eval_raw):
             correlations = {}
@@ -277,11 +301,16 @@ class LeaderboardEvaluator():
                 base_method, top_k = parse_correlation_method(method)
 
                 # Extract rankings from aggregates (already filtered by topic and run)
-                truth_ranking = self.extract_ranking(truth_filtered, truth_m)
-                eval_ranking = self.extract_ranking(eval_filtered, eval_m)
+                truth_ranking, truth_diag = self.extract_ranking(truth_filtered, truth_m)
+                eval_ranking, eval_diag = self.extract_ranking(eval_filtered, eval_m)
 
                 if truth_ranking is None or eval_ranking is None:
                     continue
+
+                # Snapshot pre-topk rankings for diagnostics (before any filtering)
+                truth_ranking_pre_topk = dict(truth_ranking)
+                eval_ranking_pre_topk = dict(eval_ranking)
+                top_run_ids: set[str] | None = None
 
                 # @k filtering: select top k runs by truth ranking
                 if top_k is not None:
@@ -294,134 +323,37 @@ class LeaderboardEvaluator():
                     truth_ranking, eval_ranking, base_method
                 )
 
+                # Always classify + (optionally) dump. Collect non-None issues
+                # for the end-of-evaluate summary warning.
+                issue = diagnose_correlation(
+                    truth_m=truth_m,
+                    eval_m=eval_m,
+                    method=method,
+                    truth_ranking_pre_topk=truth_ranking_pre_topk,
+                    eval_ranking_pre_topk=eval_ranking_pre_topk,
+                    top_run_ids=top_run_ids,
+                    truth_ranking=truth_ranking,
+                    eval_ranking=eval_ranking,
+                    on_missing=self.on_missing,
+                    truth_diag=truth_diag,
+                    eval_diag=eval_diag,
+                    diagnostics_dir=self.diagnostics_dir,
+                    eval_label=eval_file.stem,
+                )
+                if issue is not None:
+                    issues.append((truth_m, eval_m, method, issue))
+
             ret[(truth_m, eval_m)] = correlations
 
+        if issues:
+            msg = format_issues_warning(
+                issues,
+                eval_label=eval_file.stem,
+                diagnostics_dir_was_set=self.diagnostics_dir is not None,
+            )
+            warnings.warn(msg, RuntimeWarning, stacklevel=2)
+
         return ret
-
-    # def evaluate_old(
-    #     self,
-    #     eval_file: Path,
-    # ) -> Dict[Tuple[str, str], Dict]:
-    #     """
-    #     [BACKUP] Old evaluate implementation.
-
-    #     Evaluate and return dict keyed by (truth_measure, eval_measure) pairs.
-
-    #     Args:
-    #         eval_file: Path to the evaluated result file
-
-    #     Returns:
-    #         Dict mapping (truth_measure, eval_measure) pairs to correlation results.
-    #         Each method (e.g., "kendall", "kendall@10") is computed with its own
-    #         top-k filtering based on the @k suffix.
-
-    #     Filtering order:
-    #         1. Filter truth and eval to common runs (intersection for fair comparison)
-    #         2. If topic_ids specified (--only-shared-topics): filter to those topics, recompute
-    #            Otherwise (--all-topics): use provided aggregates, no topic filtering
-    #         For kendall@k specifically:
-    #         3. Get top k runs from truth's aggregates
-    #         4. Filter eval to top k runs (and topics if specified), recompute
-    #         5. Filter truth to top k runs, recompute
-    #         6. Compare rankings
-    #     """
-    #     # =======================================================================
-    #     # LOAD: Raw data without filtering
-    #     # =======================================================================
-    #     truth_raw = self.truth_result  # Lazily loaded, no filtering
-    #     eval_raw = self._load_eval_result(
-    #         eval_file, self.eval_format, self.eval_has_header, self.on_missing
-    #     )
-
-    #     # =======================================================================
-    #     # FILTER: All filtering decisions consolidated here
-    #     # =======================================================================
-
-    #     # Determine what filtering is needed
-    #     has_top_k_methods = any("@" in m for m in self.correlation_methods)
-    #     needs_topic_filter = self.topic_ids is not None
-    #     needs_run_filter = has_top_k_methods  # @k requires filtering to common runs first
-
-    #     # Apply drop_aggregate flags (CLI flags)
-    #     if self.truth_drop_aggregate:
-    #         truth_base = truth_raw.filter_and_recompute()  # Drop and recompute
-    #     else:
-    #         truth_base = truth_raw
-
-    #     if self.eval_drop_aggregate:
-    #         eval_base = eval_raw.filter_and_recompute()  # Drop and recompute
-    #     else:
-    #         eval_base = eval_raw
-
-    #     # For @k methods: filter to common runs upfront
-    #     if needs_run_filter:
-    #         common_run_ids = set(truth_base.run_ids) & set(eval_base.run_ids)
-    #         truth_for_topk = truth_base.filter_and_recompute(
-    #             topic_ids=self.topic_ids,
-    #             run_ids=common_run_ids,
-    #         )
-    #         # Warn about measures lost during filtering
-    #         lost_measures = truth_base.measures - truth_for_topk.measures
-    #         if lost_measures:
-    #             print(
-    #                 f"Warning: {len(lost_measures)} measure(s) unavailable after filtering "
-    #                 f"(no per-topic data): {sorted(lost_measures)}",
-    #                 file=sys.stderr
-    #             )
-    #     else:
-    #         truth_for_topk = None  # Not needed for non-@k methods
-
-    #     # =======================================================================
-    #     # COMPUTE: Correlations for each measure pair and method
-    #     # =======================================================================
-    #     ret = {}
-
-    #     for truth_m, eval_m in self.get_measure_pairs(eval_raw):
-    #         correlations = {}
-
-    #         for method in self.correlation_methods:
-    #             base_method, top_k = parse_correlation_method(method)
-
-    #             if top_k is not None:
-    #                 # @k method: use pre-filtered truth_for_topk
-    #                 if truth_m not in truth_for_topk.measures:
-    #                     self._handle_missing(f"Measure '{truth_m}' not found for top-k ranking")
-    #                     continue
-
-    #                 top_run_ids = set(truth_for_topk.top_k_run_ids(truth_m, top_k))
-
-    #                 # Filter eval to top k runs (and topics if specified)
-    #                 eval_for_method = eval_base.filter_and_recompute(
-    #                     topic_ids=self.topic_ids,
-    #                     run_ids=top_run_ids
-    #                 )
-
-    #                 # Filter truth to top k runs
-    #                 truth_for_method = truth_for_topk.filter_and_recompute(run_ids=top_run_ids)
-    #             else:
-    #                 # Non-@k method: preserve original aggregates (v1 behavior)
-    #                 truth_for_method = truth_base
-
-    #                 if needs_topic_filter:
-    #                     eval_for_method = eval_base.filter_and_recompute(
-    #                         topic_ids=self.topic_ids,
-    #                     )
-    #                 else:
-    #                     eval_for_method = eval_base
-
-    #             truth_ranking = self.extract_ranking(truth_for_method, truth_m)
-    #             eval_ranking = self.extract_ranking(eval_for_method, eval_m)
-
-    #             if truth_ranking is None or eval_ranking is None:
-    #                 continue
-
-    #             correlations[method] = self._compute_single_correlation(
-    #                 truth_ranking, eval_ranking, base_method
-    #             )
-
-    #         ret[(truth_m, eval_m)] = correlations
-
-    #     return ret
 
     def _align_rankings(
         self, truth_ranking: Dict[str, float], eval_ranking: Dict[str, float]

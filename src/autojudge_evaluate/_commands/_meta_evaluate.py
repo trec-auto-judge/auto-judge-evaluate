@@ -160,6 +160,14 @@ def persist_output(df: pd.DataFrame, output: Path, out_format: str = "jsonl") ->
     default=False,
     help="Suppress table output to stdout.",
 )
+@click.option(
+    "--diagnostics-dir",
+    type=Path,
+    default=None,
+    help="If set, dump per-(truth_measure, eval_measure, method) ranking JSONL files "
+         "under this directory for debugging correlation results. "
+         "Layout: <dir>/<eval_label>/<truth_m>__<eval_m>/<method>.jsonl",
+)
 @click.argument("input_files", nargs=-1, type=str)
 def meta_evaluate(
     truth_leaderboard: Path,
@@ -183,6 +191,7 @@ def meta_evaluate(
     only_shared_runs: bool,
     out_format: str,
     silent: bool,
+    diagnostics_dir: Path | None,
     input_files: tuple,
 ) -> int:
     """Compute correlation between predicted leaderboards and ground-truth leaderboard."""
@@ -278,6 +287,7 @@ def meta_evaluate(
         topic_ids=topic_ids_set,
         run_ids=run_ids_set,
         only_shared_runs=only_shared_runs,
+        diagnostics_dir=diagnostics_dir,
     )
 
     # Print diagnostic info
