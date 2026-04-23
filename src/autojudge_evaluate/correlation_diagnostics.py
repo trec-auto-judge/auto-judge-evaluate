@@ -148,9 +148,12 @@ def diagnose_correlation(
             / f"{_safe_path_component(truth_m)}__{_safe_path_component(eval_m)}"
         )
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{_safe_path_component(method)}.jsonl"
+        method_safe = _safe_path_component(method)
+        out_path = out_dir / f"{method_safe}.jsonl"
+        ranking_path = out_dir / f"{method_safe}.ranking.tsv"
 
         all_runs = set(truth_ranking_pre_topk.keys()) | set(eval_ranking_pre_topk.keys())
+        rows: List[CorrelationDiagnosticRow] = []
         with out_path.open("w", encoding="utf-8") as f:
             for run in sorted(all_runs):
                 row = CorrelationDiagnosticRow(
@@ -161,7 +164,18 @@ def diagnose_correlation(
                     kept=run in kept_systems,
                     issue=issue,
                 )
+                rows.append(row)
                 f.write(row.model_dump_json())
                 f.write("\n")
+
+        # Companion ranking: kept=True rows, sorted by eval_score desc.
+        kept_rows = [r for r in rows if r.kept]
+        kept_rows.sort(key=lambda r: (r.eval_score if r.eval_score is not None else float("-inf")), reverse=True)
+        with ranking_path.open("w", encoding="utf-8") as f:
+            f.write("run\teval_score\ttruth_score\n")
+            for r in kept_rows:
+                eval_s = "" if r.eval_score is None else f"{r.eval_score}"
+                truth_s = "" if r.truth_score is None else f"{r.truth_score}"
+                f.write(f"{r.run}\t{eval_s}\t{truth_s}\n")
 
     return issue
