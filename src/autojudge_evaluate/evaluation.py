@@ -278,10 +278,16 @@ class LeaderboardEvaluator():
 
         if self.run_ids is not None:
             valid_run_ids = set(self.run_ids)
+            print("evaluation.py 1 valid_run_ids", valid_run_ids)
+
 
         if self.only_shared_runs or has_top_k_methods:
             common_run_ids = set(truth_filtered.run_ids) & set(eval_filtered.run_ids)
             valid_run_ids = common_run_ids if valid_run_ids is None else valid_run_ids & common_run_ids
+            print("evaluation.py 2 set(eval_filtered.run_ids)", set(eval_filtered.run_ids))
+            print("evaluation.py 2 set(truth_filtered.run_ids)", set(truth_filtered.run_ids))
+            print("evaluation.py 2 common_run_ids", common_run_ids)
+            print("evaluation.py 2 valid_run_ids", valid_run_ids)
 
         # Apply run filtering to EvalResults
         if valid_run_ids is not None:
@@ -289,8 +295,8 @@ class LeaderboardEvaluator():
             eval_filtered = eval_filtered.filter_runs(valid_run_ids)
 
 
-        print("evaluation.py self.topic_ids", self.topic_ids)
-        print("evaluation.py valid_run_ids", valid_run_ids)
+        print("evaluation.py 3 self.topic_ids", self.topic_ids)
+        print("evaluation.py 3 valid_run_ids", valid_run_ids)
 
 
         # =======================================================================
