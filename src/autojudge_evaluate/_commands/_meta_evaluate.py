@@ -12,7 +12,7 @@ from autojudge_base.click_plus import (
     LEADERBOARD_FORMAT_HELP,
 )
 from autojudge_base.leaderboard import check_format_mismatch
-from autojudge_evaluate.evaluation import LeaderboardEvaluator, CorrelationMethodType
+from autojudge_evaluate.evaluation import EvalResultFormat, LeaderboardEvaluator, CorrelationMethodType, OnMissing
 from autojudge_evaluate.eval_results import load as load_eval_result, EvalResult
 
 
@@ -173,13 +173,13 @@ def meta_evaluate(
     truth_leaderboard: Path,
     truth_measure: tuple,
     eval_measure: tuple,
-    truth_format: str,
+    truth_format: EvalResultFormat,
     truth_header: bool,
-    eval_format: str,
+    eval_format: EvalResultFormat,
     eval_header: bool,
     truth_drop_aggregate: bool,
     eval_drop_aggregate: bool,
-    on_missing: str,
+    on_missing: OnMissing,
     input: tuple,
     output: Path,
     aggregate: bool,

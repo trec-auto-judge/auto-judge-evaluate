@@ -829,6 +829,7 @@ def plot_grouped_bar(
     series_col: str,
     title: str,
     out_path: Path,
+    legend_cols: int,
     ylabel: str = "Correlation",
     color_map: dict[str, str] | None = None,
     hatch_map: dict[str, str] | None = None,
@@ -855,11 +856,12 @@ def plot_grouped_bar(
         return
 
     x = np.arange(n_groups)
-    total_width = 0.85
+    total_width = 0.90
     bar_width = total_width / n_series
 
     # fig, ax = plt.subplots(figsize=(max(5, n_groups * 1.5), 3.2))
-    fig, ax = plt.subplots(figsize=(max(5, n_groups * 1.5), 1.5))
+    # fig, ax = plt.subplots(figsize=(max(5, n_groups * 1.5), 1.5))
+    fig, ax = plt.subplots(figsize=(max(2, n_groups * 1.0), 1.5))
 
     for i, (_, row) in enumerate(df.iterrows()):
         judge = row[series_col]
@@ -887,23 +889,35 @@ def plot_grouped_bar(
     ax.set_yticks([0, 0.25, 0.50, 0.75, 1.00])
     ax.yaxis.grid(True, color="0.85", linewidth=0.5)
     ax.xaxis.grid(False)
-    ax.set_ylim(0, 1.15)
+    # ax.set_ylim(0, 1.15)
+    ax.set_ylim(0, 1.05)
 
     # X-axis
     ax.set_xticks(x)
     ax.set_xticklabels(group_cols, rotation=0, ha="center", fontsize=6, color="0.0")
     # ax.set_xlim(-0.5, len(df.columns) - 0.5)
+    # ax.set_xlim(-0.1, len(df.columns) - 0.1)
     
     # Labels and title
     ax.set_ylabel(ylabel, fontsize=6, color="0.0")
     # ax.set_title(title, fontsize=6, color="0.3", loc="left", pad=10)
 
     # Legend above plot, wrapping into multiple rows via ncol
+    # ax.legend(
+    #     loc="lower left", bbox_to_anchor=(0, 1.02), ncol=min(n_series, 10),
+    #     borderaxespad=0, handlelength=1.2, handleheight=0.8,
+    #     columnspacing=1.0,
+    # )
+    # Deduplicate legend entries with same label
+    handles, labels = ax.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))  # keeps last handle per label
     ax.legend(
-        loc="lower left", bbox_to_anchor=(0, 1.02), ncol=min(n_series, 5),
+        by_label.values(), by_label.keys(),
+        loc="lower left", bbox_to_anchor=(0, 1.02), ncol=min(len(by_label), legend_cols),
         borderaxespad=0, handlelength=1.2, handleheight=0.8,
         columnspacing=1.0,
     )
+
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, format="pdf", bbox_inches="tight", pad_inches=0.03)
@@ -919,6 +933,7 @@ def plot_correlation_consistency(
     df: pd.DataFrame,
     metric_cols: list[str],
     plot_dir: Path,
+    legend_cols: int,
     color_map: dict[str, str] | None = None,
     hatch_map: dict[str, str] | None = None,
     all_datasets: bool = False,
@@ -955,11 +970,11 @@ def plot_correlation_consistency(
                 continue
             avail = [c for c in merged.columns if c not in row_id_cols]
             slug = _slugify("all_" + "_".join(str(v) for v in group_vals))
-            plot_grouped_bar(merged, avail, "Judge", title, plot_dir / f"{slug}.pdf",
+            plot_grouped_bar(merged, avail, "Judge",  title, plot_dir / f"{slug}.pdf", legend_cols,
                              color_map=color_map, hatch_map=hatch_map)
         else:
             avail = [c for c in metric_cols if c in group_df.columns]
-            plot_grouped_bar(group_df, avail, "Judge", title, plot_dir / f"{slug}.pdf",
+            plot_grouped_bar(group_df, avail, "Judge", title, plot_dir / f"{slug}.pdf", legend_cols,
                              color_map=color_map, hatch_map=hatch_map)
 
 
@@ -967,6 +982,7 @@ def plot_measures_as_columns(
     df: pd.DataFrame,
     metric_cols: list[str],
     plot_dir: Path,
+    legend_cols:int,
     color_map: dict[str, str] | None = None,
     hatch_map: dict[str, str] | None = None,
     all_datasets: bool = False,
@@ -1001,7 +1017,7 @@ def plot_measures_as_columns(
             pivoted = pivoted.sort_values("_sort").drop(columns=["_sort"])
 
             measure_cols = [c for c in pivoted.columns if c not in row_id_cols]
-            plot_grouped_bar(pivoted, measure_cols, "Judge", title, plot_dir / f"{slug}.pdf", ylabel=metric,
+            plot_grouped_bar(pivoted, measure_cols, "Judge", title, plot_dir / f"{slug}.pdf", legend_cols, ylabel=metric,
                              color_map=color_map, hatch_map=hatch_map)
 
         if all_datasets and dataset_keys:
@@ -1088,6 +1104,12 @@ def plot_measures_as_columns(
     help="Threshold for 'statistically same': values within this of the max are also bolded.",
 )
 @click.option(
+    "--legend-cols",
+    type=int,
+    default=6,
+    help="Columns in the legens.",
+)
+@click.option(
     "--plot-dir",
     type=click.Path(path_type=Path),
     default=None,
@@ -1111,6 +1133,7 @@ def main(
     truth_measure: tuple,
     eval_measures: tuple,
     same: float,
+    legend_cols: int,
     plot_dir: Optional[Path],
     output: Optional[Path],
 ):
@@ -1182,13 +1205,13 @@ def main(
     if columns == "measures":
         result = measures_as_columns(df, metric_cols, format, same_threshold=same, summary=summary)
         if plot_dir:
-            plot_measures_as_columns(df, metric_cols, plot_dir,
+            plot_measures_as_columns(df, metric_cols, plot_dir, legend_cols,
                                      color_map=color_map, hatch_map=hatch_map,
                                      all_datasets=summary)
     else:
         result = correlation_consistency(df, metric_cols, format, same_threshold=same, summary=summary)
         if plot_dir:
-            plot_correlation_consistency(df, metric_cols, plot_dir,
+            plot_correlation_consistency(df, metric_cols, plot_dir, legend_cols,
                                          color_map=color_map, hatch_map=hatch_map,
                                          all_datasets=summary)
 

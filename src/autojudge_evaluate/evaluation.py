@@ -79,7 +79,7 @@ class LeaderboardEvaluator():
         truth_format: EvalResultFormat = "ir_measures",
         truth_has_header: bool = False,
         truth_drop_aggregate: bool = False,
-        eval_format: EvalResultFormat = "tot",
+        eval_format: EvalResultFormat = "ir_measures",
         eval_has_header: bool = False,
         eval_drop_aggregate: bool = False,
         correlation_methods: List[str] | None = None,
@@ -287,6 +287,11 @@ class LeaderboardEvaluator():
         if valid_run_ids is not None:
             truth_filtered = truth_filtered.filter_runs(valid_run_ids)
             eval_filtered = eval_filtered.filter_runs(valid_run_ids)
+
+
+        print("evaluation.py self.topic_ids", self.topic_ids)
+        print("evaluation.py valid_run_ids", valid_run_ids)
+
 
         # =======================================================================
         # COMPUTE: Correlations for each measure pair and method
