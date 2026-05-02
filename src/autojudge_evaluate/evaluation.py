@@ -148,7 +148,7 @@ class LeaderboardEvaluator():
             raise ValueError(f"Path does not exist: {path}")
 
         # Map on_missing: "skip"/"default" -> "ignore"
-        eval_on_missing = "ignore" if on_missing in ("skip", "default") else on_missing
+        eval_on_missing: Literal['error', 'warn', 'ignore'] = "ignore" if on_missing in ("skip", "default") else on_missing
 
         return load_eval_result(
             Path(path),
@@ -237,6 +237,7 @@ class LeaderboardEvaluator():
         eval_raw = self._load_eval_result(
             eval_file, self.eval_format, self.eval_has_header, self.on_missing
         )
+        print("evaluation.py DEBUG eval_raw.run_ids", eval_raw.run_ids)
 
         # =======================================================================
         # FILTER: Two independent dimensions
