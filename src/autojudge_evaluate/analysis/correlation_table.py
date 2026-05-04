@@ -861,7 +861,10 @@ def plot_grouped_bar(
 
     # fig, ax = plt.subplots(figsize=(max(5, n_groups * 1.5), 3.2))
     # fig, ax = plt.subplots(figsize=(max(5, n_groups * 1.5), 1.5))
-    fig, ax = plt.subplots(figsize=(max(2, n_groups * 1.0), 1.5))
+    
+    bar_weight = 0.2 + 0.2 * n_series
+    
+    fig, ax = plt.subplots(figsize=(max(2, n_groups * bar_weight), 1.5))
 
     for i, (_, row) in enumerate(df.iterrows()):
         judge = row[series_col]
@@ -897,6 +900,8 @@ def plot_grouped_bar(
     ax.set_xticklabels(group_cols, rotation=0, ha="center", fontsize=6, color="0.0")
     # ax.set_xlim(-0.5, len(df.columns) - 0.5)
     # ax.set_xlim(-0.1, len(df.columns) - 0.1)
+    half_cluster = total_width / 2
+    ax.set_xlim(-half_cluster, n_groups - 1 + half_cluster)    
     
     # Labels and title
     ax.set_ylabel(ylabel, fontsize=6, color="0.0")
