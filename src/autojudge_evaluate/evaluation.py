@@ -396,8 +396,15 @@ class LeaderboardEvaluator():
     def _compute_single_correlation(
         self, truth_ranking: Dict[str, float], eval_ranking: Dict[str, float], base_method: str
     ) -> float:
-        """Compute a single correlation between aligned rankings."""
+        """Compute a single correlation between aligned rankings.
+
+        Returns NaN when fewer than 3 runs align (e.g. an eval file sharing no
+        runs with the truth); `diagnose_correlation` reports it in the
+        correlation-issues warning, so one mismatched file does not abort the other judges.
+        """
         a, b = self._align_rankings(truth_ranking, eval_ranking)
+        if len(a) < 3:
+            return float("nan")
 
         if base_method == "tauap_b":
             return tauap_b(a, b)

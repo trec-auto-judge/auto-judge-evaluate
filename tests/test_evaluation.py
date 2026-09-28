@@ -124,3 +124,24 @@ class TestEvaluation(unittest.TestCase):
             te = LeaderboardEvaluator(leaderboard, truth_measures=["measure-does-not-exist"], eval_measures=["M1"], truth_format="tot", eval_format="tot")
             with self.assertRaises(ValueError):
                 te.evaluate(leaderboard)
+    def test_eval_file_sharing_no_runs_gives_nan_instead_of_crashing(self):
+        """An eval file with no runs in common with the truth yields NaN plus a
+        correlation-issues warning, so meta-evaluating several files is not aborted by one."""
+        import math
+        import warnings
+        disjoint = EXAMPLE_01.replace("run_", "other_")
+        with TemporaryDirectory() as d:
+            truth = Path(d) / "truth"
+            truth.write_text(EXAMPLE_01)
+            other = Path(d) / "other"
+            other.write_text(disjoint)
+            te = LeaderboardEvaluator(truth, truth_measures=["ORACLE"], eval_measures=["ORACLE"], truth_format="tot",
+                                      eval_format="tot", on_missing="default",
+                                      correlation_methods=["kendall", "kendall@10"])
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                actual = te.evaluate(other)
+            self.assertTrue(math.isnan(actual[("ORACLE", "ORACLE")]["kendall"]))
+            self.assertTrue(any("correlation issues" in str(w.message) for w in caught))
+            # The truth itself still evaluates normally afterwards.
+            self.assertEqual(1.0, te.evaluate(truth)[("ORACLE", "ORACLE")]["kendall"])
