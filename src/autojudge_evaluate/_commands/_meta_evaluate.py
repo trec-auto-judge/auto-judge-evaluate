@@ -84,12 +84,12 @@ def persist_output(df: pd.DataFrame, output: Path, out_format: str = "jsonl") ->
 @click.option(
     "--on-missing",
     type=click.Choice(["error", "warn", "skip", "default"]),
-    default="error",
+    default="default",
     help="How to handle run_id mismatches between truth and eval leaderboards: \n"
+         "default (the default): use 0.0 for missing values, keeping all runs \n"
          "error: raise an error \n"
          "warn: print warning, use common systems only \n"
-         "skip: silently use common systems only \n"
-         "default: use 0.0 for missing values",
+         "skip: silently use common systems only",
 )
 @click.option(
     "--input", "-i",
