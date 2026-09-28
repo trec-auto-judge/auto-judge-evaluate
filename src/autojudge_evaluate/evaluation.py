@@ -270,7 +270,6 @@ class LeaderboardEvaluator():
             eval_filtered = eval_raw
 
         # Step 2: Run filtering (no recompute)
-        has_top_k_methods = any("@" in m for m in self.correlation_methods)
 
         # Compute valid_run_ids (intersection of all constraints)
         valid_run_ids: set[str] | None = None
@@ -278,8 +277,11 @@ class LeaderboardEvaluator():
         if self.run_ids is not None:
             valid_run_ids = set(self.run_ids)
 
-
-        if self.only_shared_runs or has_top_k_methods:
+        # Only --only-shared-runs drops runs missing from either side. @k methods
+        # must not trigger this: it would drop runs the judge left out before
+        # on_missing="default" can score them 0, so a judge that skips runs
+        # would look perfect.
+        if self.only_shared_runs:
             common_run_ids = set(truth_filtered.run_ids) & set(eval_filtered.run_ids)
             valid_run_ids = common_run_ids if valid_run_ids is None else valid_run_ids & common_run_ids
 
