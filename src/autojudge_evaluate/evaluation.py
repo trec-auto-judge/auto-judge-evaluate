@@ -6,7 +6,7 @@ from typing import Dict, List, Literal, Tuple
 
 import warnings
 
-from autojudge_evaluate.eval_results import load as load_eval_result, EvalResult
+from autojudge_evaluate.eval_results import load as load_eval_result, load_qrels, EvalResult, ALL_TOPIC_ID
 from autojudge_evaluate.correlation_diagnostics import (
     CorrelationIssue,
     RankingExtractionDiagnostic,
@@ -19,16 +19,20 @@ from autojudge_base import LeaderboardFormat
 OnMissing = Literal["error", "warn", "skip", "default"]
 EvalResultFormat = LeaderboardFormat
 BASE_CORRELATION_METHODS = ["kendall", "pearson", "spearman", "tauap_b"]
+# Per-topic agreement: within each topic, correlate truth and eval values
+# across runs (i.e. per response), then average over topics.
+PER_TOPIC_METHODS = ["kendall_per_topic", "spearman_per_topic", "pearson_per_topic"]
 # Not a correlation: fraction of truth runs the judge scored. Reported next to the
 # correlations so a low score from missing runs (scored 0) can be told apart from
 # a judge that orders its runs badly.
 COVERAGE_METHOD = "coverage"
 TOP_K_VALUES = [10]
 CORRELATION_METHODS: List[str] = (
-    BASE_CORRELATION_METHODS + 
+    BASE_CORRELATION_METHODS +
     ["kendall@10"]
     # [f"{m}@{k}" for m in BASE_CORRELATION_METHODS for k in TOP_K_VALUES]
     + [COVERAGE_METHOD]
+    + PER_TOPIC_METHODS
 )
 
 
@@ -39,11 +43,12 @@ def parse_correlation_method(method: str) -> tuple[str, int | None]:
         "kendall" -> ("kendall", None)
         "kendall@10" -> ("kendall", 10)
         "coverage" -> ("coverage", None)
+        "kendall_per_topic" -> ("kendall_per_topic", None)
 
     Raises:
         ValueError: if base method is invalid or k is not a positive integer.
     """
-    if method == COVERAGE_METHOD:
+    if method in PER_TOPIC_METHODS or method == COVERAGE_METHOD:
         return (method, None)
     if "@" in method:
         base, k_str = method.split("@", 1)
@@ -67,7 +72,7 @@ class CorrelationMethodType(click.ParamType):
             parse_correlation_method(value)
             return value
         except ValueError as e:
-            methods = ", ".join(BASE_CORRELATION_METHODS + [COVERAGE_METHOD])
+            methods = ", ".join(BASE_CORRELATION_METHODS + PER_TOPIC_METHODS + [COVERAGE_METHOD])
             self.fail(
                 f"{e}. Valid: [{methods}] or method@k (e.g., kendall@15).",
                 param,
@@ -228,12 +233,15 @@ class LeaderboardEvaluator():
     def evaluate(
         self,
         eval_file: Path,
+        is_qrels: bool = False,
     ) -> Dict[Tuple[str, str], Dict]:
         """
         Evaluate and return dict keyed by (truth_measure, eval_measure) pairs.
 
         Args:
             eval_file: Path to the evaluated result file
+            is_qrels: eval_file is judge qrels on responses (read via load_qrels)
+                rather than a leaderboard in eval_format
 
         Returns:
             Dict mapping (truth_measure, eval_measure) pairs to correlation results.
@@ -242,9 +250,12 @@ class LeaderboardEvaluator():
         # LOAD: Raw data without filtering
         # =======================================================================
         truth_raw = self.truth_result  # Lazily loaded, no filtering
-        eval_raw = self._load_eval_result(
-            eval_file, self.eval_format, self.eval_has_header, self.on_missing
-        )
+        if is_qrels:
+            eval_raw = load_qrels(Path(eval_file))
+        else:
+            eval_raw = self._load_eval_result(
+                eval_file, self.eval_format, self.eval_has_header, self.on_missing
+            )
         # =======================================================================
         # FILTER: Two independent dimensions
         #
@@ -312,6 +323,13 @@ class LeaderboardEvaluator():
 
             for method in self.correlation_methods:
                 base_method, top_k = parse_correlation_method(method)
+
+                if base_method in PER_TOPIC_METHODS:
+                    correlations[method] = self._per_topic_correlation(
+                        truth_filtered, eval_filtered, truth_m, eval_m,
+                        base_method[: -len("_per_topic")],
+                    )
+                    continue
 
                 # Extract rankings from aggregates (already filtered by topic and run)
                 truth_ranking, truth_diag = self.extract_ranking(truth_filtered, truth_m)
@@ -419,6 +437,50 @@ class LeaderboardEvaluator():
         if not truth_ranking or eval_diag.defaulted:
             return 0.0
         return len(truth_ranking.keys() & eval_ranking.keys()) / len(truth_ranking)
+
+    @staticmethod
+    def _topic_values(result: EvalResult, measure: str) -> Dict[str, Dict[str, float]]:
+        """topic_id -> {run_id: value} for numeric per-topic rows of ``measure``."""
+        by_topic: Dict[str, Dict[str, float]] = {}
+        for e in result.entries_by_measure(measure):
+            if e.topic_id != ALL_TOPIC_ID and isinstance(e.value, (int, float)):
+                by_topic.setdefault(e.topic_id, {})[e.run_id] = float(e.value)
+        return by_topic
+
+    def _per_topic_correlation(
+        self,
+        truth_result: EvalResult,
+        eval_result: EvalResult,
+        truth_m: str,
+        eval_m: str,
+        base_method: str,
+    ) -> float:
+        """Mean over truth topics of the correlation between truth and eval values
+        across runs within that topic, i.e. agreement per response.
+
+        Each topic uses the truth's runs for that topic. A run the eval lacks for
+        the topic scores 0 with on_missing="default", and is left out otherwise
+        (no per-topic errors or warnings; coverage issues surface in the
+        aggregate correlations). Topics with fewer than 3 runs or constant values
+        on either side have no correlation and are left out of the mean; NaN if
+        no topic qualifies.
+        """
+        truth_topics = self._topic_values(truth_result, truth_m)
+        eval_topics = self._topic_values(eval_result, eval_m)
+        values = []
+        for topic_id, truth_runs in sorted(truth_topics.items()):
+            eval_runs = eval_topics.get(topic_id, {})
+            if self.on_missing == "default":
+                runs = sorted(truth_runs)
+                b = [eval_runs.get(r, 0.0) for r in runs]
+            else:
+                runs = sorted(set(truth_runs) & set(eval_runs))
+                b = [eval_runs[r] for r in runs]
+            a = [truth_runs[r] for r in runs]
+            if len(a) < 3 or len(set(a)) < 2 or len(set(b)) < 2:
+                continue
+            values.append(correlation(a, b, base_method))
+        return sum(values) / len(values) if values else float("nan")
 
     def _compute_single_correlation(
         self, truth_ranking: Dict[str, float], eval_ranking: Dict[str, float], base_method: str

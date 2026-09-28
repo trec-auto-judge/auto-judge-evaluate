@@ -56,6 +56,37 @@ def load(
         return _load_file(path, format, has_header, drop_aggregates, recompute_aggregates, verify, on_missing)
 
 
+QRELS_MEASURE = "QRELS_GRADE"
+
+
+def load_qrels(path: Path, measure: str = QRELS_MEASURE) -> EvalResult:
+    """
+    Load a judge's response-level qrels as an EvalResult.
+
+    Each qrels line ``topic_id  0  run_id  grade`` becomes an entry
+    ``(run_id, topic_id, measure, grade)``: the grade the judge gave that run's
+    response for that topic. The ``all`` row is the mean grade per run, so the
+    result works both for per-topic agreement and as a leaderboard.
+
+    Qrels may also grade a system as a whole with topic ``all``
+    (``all  0  run_id  grade``); when present, those lines are the ``all`` rows
+    as given instead of a computed mean.
+
+    The document column must hold run ids (the starter kit's
+    ``qrels_doc_id: run_id``); qrels keyed by response hash do not match truth
+    run ids.
+    """
+    from autojudge_base.qrels.qrels import read_qrel_file
+
+    rows = read_qrel_file(path).rows
+    has_given_aggregates = any(str(row.topic_id) == ALL_TOPIC_ID for row in rows)
+    builder = EvalResultBuilder(MeasureSpecs.from_single({measure: "float"}))
+    for row in rows:
+        builder.add(row.doc_id, str(row.topic_id), measure, float(row.grade))
+    # Judges need not grade every (run, topic); the mean is over graded topics.
+    return builder.build(compute_aggregates=not has_given_aggregates, verify=True, on_missing="ignore")
+
+
 def _load_directory(
     directory: Path,
     format: Format,

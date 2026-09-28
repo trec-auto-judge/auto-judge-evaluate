@@ -2,7 +2,7 @@ import click
 import glob
 from pathlib import Path
 import pandas as pd
-from typing import List, Set
+from typing import List, Set, Tuple
 
 from tira.io_utils import to_prototext
 
@@ -13,7 +13,7 @@ from autojudge_base.click_plus import (
 )
 from autojudge_base.leaderboard import check_format_mismatch
 from autojudge_evaluate.evaluation import EvalResultFormat, LeaderboardEvaluator, CorrelationMethodType, OnMissing
-from autojudge_evaluate.eval_results import load as load_eval_result, EvalResult
+from autojudge_evaluate.eval_results import load as load_eval_result, load_qrels, EvalResult
 
 
 def persist_output(df: pd.DataFrame, output: Path, out_format: str = "jsonl") -> None:
@@ -58,8 +58,15 @@ def persist_output(df: pd.DataFrame, output: Path, out_format: str = "jsonl") ->
 @click.option(
     "--eval-format",
     type=click.Choice(LEADERBOARD_FORMATS),
-    required=True,
-    help="Format of the input leaderboard file(s):\n" + LEADERBOARD_FORMAT_HELP,
+    default=None,
+    help="Format of the input leaderboard file(s) (required when leaderboard files are given):\n" + LEADERBOARD_FORMAT_HELP,
+)
+@click.option(
+    "--eval-qrels",
+    type=str,
+    multiple=True,
+    help="Judge qrels file or glob ('topic 0 run_id grade', or 'all 0 run_id grade' for "
+         "whole-system grades), evaluated as a leaderboard next to the leaderboard inputs. Repeatable.",
 )
 @click.option(
     "--truth-header/--no-truth-header",
@@ -176,7 +183,8 @@ def meta_evaluate(
     eval_measure: tuple,
     truth_format: EvalResultFormat,
     truth_header: bool,
-    eval_format: EvalResultFormat,
+    eval_format: EvalResultFormat | None,
+    eval_qrels: tuple,
     eval_header: bool,
     truth_drop_aggregate: bool,
     eval_drop_aggregate: bool,
@@ -196,18 +204,42 @@ def meta_evaluate(
     input_files: tuple,
 ) -> int:
     """Compute correlation between predicted leaderboards and ground-truth leaderboard."""
-    # Combine --input options and positional arguments, expand globs
-    all_inputs: List[Path] = []
-    for pattern in list(input) + list(input_files):
-        matches = sorted(glob.glob(pattern, recursive=True))
-        if matches:
-            all_inputs.extend(Path(m) for m in matches)
-        else:
-            # No glob match - treat as literal path
-            all_inputs.append(Path(pattern))
+    def expand(patterns) -> List[Path]:
+        """Expand globs; a pattern without matches is taken as a literal path."""
+        paths: List[Path] = []
+        for pattern in patterns:
+            matches = sorted(glob.glob(pattern, recursive=True))
+            if matches:
+                paths.extend(Path(m) for m in matches)
+            else:
+                paths.append(Path(pattern))
+        return paths
+
+    # Leaderboards come from --input and positional arguments, judge qrels from
+    # --eval-qrels; each input is (path, is_qrels).
+    leaderboard_inputs = expand(list(input) + list(input_files))
+    all_inputs: List[Tuple[Path, bool]] = (
+        [(p, False) for p in leaderboard_inputs] + [(p, True) for p in expand(eval_qrels)]
+    )
 
     if not all_inputs:
-        raise click.ClickException("No input files specified. Use --input or positional arguments.")
+        raise click.ClickException("No input files specified. Use --input, positional arguments or --eval-qrels.")
+    if leaderboard_inputs and eval_format is None:
+        raise click.UsageError("Specify --eval-format for the leaderboard inputs (qrels go via --eval-qrels).")
+
+    def load_eval_input(path: Path, is_qrels: bool) -> EvalResult:
+        """Load one eval input without filtering (for topic/run statistics)."""
+        if is_qrels:
+            return load_qrels(path)
+        return load_eval_result(
+            path,
+            format=eval_format,
+            has_header=eval_has_header,
+            drop_aggregates=eval_drop_aggregate,
+            recompute_aggregates=False,
+            verify=False,
+            on_missing="ignore",
+        )
 
     # Detect headers interactively if not explicitly specified
     truth_has_header = detect_header_interactive(
@@ -216,9 +248,9 @@ def meta_evaluate(
 
     # For eval files, check the first one and apply to all
     eval_has_header = eval_header
-    if all_inputs and not eval_header:
+    if leaderboard_inputs and not eval_header:
         eval_has_header = detect_header_interactive(
-            all_inputs[0], eval_format, eval_header, "eval"
+            leaderboard_inputs[0], eval_format, eval_header, "eval"
         )
 
     # Convert tuples to lists/sets (empty tuple means "all" / None)
@@ -245,16 +277,8 @@ def meta_evaluate(
     elif only_shared_topics or topic_ids_from_eval:
         # Need to load eval files to get their topics
         eval_topics_union: Set[str] = set()
-        for eval_path in all_inputs:
-            er = load_eval_result(
-                eval_path,
-                format=eval_format,
-                has_header=eval_has_header,
-                drop_aggregates=eval_drop_aggregate,
-                recompute_aggregates=False,
-                verify=False,
-                on_missing="ignore",
-            )
+        for eval_path, is_qrels in all_inputs:
+            er = load_eval_input(eval_path, is_qrels)
             eval_topics_union.update(er.topic_ids)
 
         if only_shared_topics:
@@ -304,16 +328,8 @@ def meta_evaluate(
     # Collect eval leaderboard stats (union across all input files)
     eval_run_ids: Set[str] = set()
     eval_topic_ids: Set[str] = set()
-    for eval_path in all_inputs:
-        er = load_eval_result(
-            eval_path,
-            format=eval_format,
-            has_header=eval_has_header,
-            drop_aggregates=eval_drop_aggregate,
-            recompute_aggregates=False,
-            verify=False,
-            on_missing="ignore",
-        )
+    for eval_path, is_qrels in all_inputs:
+        er = load_eval_input(eval_path, is_qrels)
         eval_run_ids.update(er.run_ids)
         eval_topic_ids.update(er.topic_ids)
     click.echo(
@@ -342,7 +358,7 @@ def meta_evaluate(
     )
 
     # Pre-hoc format check: warn if eval files appear to be wrong format
-    for eval_path in all_inputs:
+    for eval_path in leaderboard_inputs:
         warning = check_format_mismatch(
             eval_path,
             specified_format=eval_format,
@@ -372,8 +388,8 @@ def meta_evaluate(
 
     df = []
 
-    for c in all_inputs:
-        result = te.evaluate(c)
+    for c, is_qrels in all_inputs:
+        result = te.evaluate(c, is_qrels=is_qrels)
 
         for (truth_m, eval_m), metrics in result.items():
             tmp = {
