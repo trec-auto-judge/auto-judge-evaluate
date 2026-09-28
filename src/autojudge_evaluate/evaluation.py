@@ -18,7 +18,7 @@ from autojudge_base import LeaderboardFormat
 # TODO: Consider unifying with leaderboard.OnMissing which uses "fix_aggregate" instead of "skip"
 OnMissing = Literal["error", "warn", "skip", "default"]
 EvalResultFormat = LeaderboardFormat
-BASE_CORRELATION_METHODS = ["kendall", "pearson", "spearman", "tauap_b"]
+BASE_CORRELATION_METHODS = ["kendall", "pearson", "spearman", "tauap_b", "tau_gap"]
 # Per-topic agreement: within each topic, correlate truth and eval values
 # across runs (i.e. per response), then average over topics.
 PER_TOPIC_METHODS = ["kendall_per_topic", "spearman_per_topic", "pearson_per_topic"]
@@ -499,6 +499,8 @@ class LeaderboardEvaluator():
 
         if base_method == "tauap_b":
             return tauap_b(a, b)
+        elif base_method == "tau_gap":
+            return tau_gap(a, b)
         else:
             return correlation(a, b, base_method)
 
@@ -521,3 +523,36 @@ def tauap_b(a, b):
 
     _check_input_or_raise(a, b)
     return method(a, b)
+
+
+def tau_gap(truth, pred):
+    """Head-weighted, gap-sensitive rank correlation (Gao & Oard, SIGIR 2015, Eq. 3).
+
+        tau_gap = 2/(N-1) * sum_{i=2..N} ( sum_{j<i} |CG_ji| / sum_{j<i} |G_ji| ) - 1
+
+    Items are walked in the order of ``pred``; G_ji is the gap in ``truth`` scores
+    between the item at rank j and the item at rank i, and CG_ji keeps that gap only
+    when ``truth`` orders the pair the same way. Unlike tauap_b this is asymmetric:
+    ``truth`` supplies the gaps. Swapping near-tied truth scores costs little; swapping
+    widely separated ones costs a lot.
+
+    Ties (not covered by the paper): as in tauap_b, only items strictly above i's tie
+    group in ``pred`` count as j < i, and pairs tied in ``truth`` have zero gap. An i
+    whose gaps are all zero is skipped and the 2/(N-1) factor counts only scored i's.
+    Returns 0.0 if no i can be scored (e.g. pred or truth all tied).
+    """
+    _check_input_or_raise(truth, pred)
+    terms = []
+    for t_i, p_i in zip(truth, pred):
+        total = correct = 0.0
+        for t_j, p_j in zip(truth, pred):
+            if p_j > p_i:
+                gap = abs(t_j - t_i)
+                total += gap
+                if t_j > t_i:
+                    correct += gap
+        if total > 0:
+            terms.append(correct / total)
+    if not terms:
+        return 0.0
+    return 2 * sum(terms) / len(terms) - 1

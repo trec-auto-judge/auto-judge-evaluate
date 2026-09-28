@@ -36,7 +36,7 @@ auto-judge-evaluate meta-evaluate \
 | `--truth-format FMT` | Format: `trec_eval`, `tot`, `ir_measures`, `ranking`, `jsonl` |
 | `--eval-format FMT` | Format of input leaderboard files |
 | `-i FILE` / positional | Input leaderboard file(s), supports globs. Repeatable |
-| `--correlation METHOD` | Correlation method. Repeatable. Supports `kendall`, `pearson`, `spearman`, `tauap_b`, and top-k variants like `kendall@15`. Also `coverage`: the fraction of truth runs the judge scored, to tell missing runs (scored 0 by default) apart from bad ordering |
+| `--correlation METHOD` | Correlation method. Repeatable. Supports `kendall`, `pearson`, `spearman`, `tauap_b`, `tau_gap` ([Gao & Oard, SIGIR 2015](https://doi.org/10.1145/2766462.2767793): like `tauap_b`, but a swap costs in proportion to the truth score gap), and top-k variants like `kendall@15`. Also `coverage`: the fraction of truth runs the judge scored, to tell missing runs (scored 0 by default) apart from bad ordering |
 | `--truth-measure NAME` | Truth measure(s) to correlate against. Repeatable. Omit for all |
 | `--eval-measure NAME` | Eval measure(s) to include. Repeatable. Omit for all |
 | `--on-missing MODE` | Handle run mismatches: `error`, `warn`, `skip`, `default` (fill 0.0) |
