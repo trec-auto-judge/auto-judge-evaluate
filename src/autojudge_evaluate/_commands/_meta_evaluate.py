@@ -115,7 +115,8 @@ def persist_output(df: pd.DataFrame, output: Path, out_format: str = "jsonl") ->
     "--correlation",
     type=CorrelationMethodType(),
     multiple=True,
-    help="Correlation method(s) to compute (e.g., kendall, kendall@15). Repeatable. If omitted, computes all.",
+    help="Correlation method(s) to compute (e.g., kendall, kendall@15), or coverage (fraction of truth "
+         "runs the judge scored). Repeatable. If omitted, computes all.",
 )
 @click.option(
     "--topic",

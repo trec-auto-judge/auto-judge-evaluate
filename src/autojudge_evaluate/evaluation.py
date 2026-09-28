@@ -19,11 +19,16 @@ from autojudge_base import LeaderboardFormat
 OnMissing = Literal["error", "warn", "skip", "default"]
 EvalResultFormat = LeaderboardFormat
 BASE_CORRELATION_METHODS = ["kendall", "pearson", "spearman", "tauap_b"]
+# Not a correlation: fraction of truth runs the judge scored. Reported next to the
+# correlations so a low score from missing runs (scored 0) can be told apart from
+# a judge that orders its runs badly.
+COVERAGE_METHOD = "coverage"
 TOP_K_VALUES = [10]
 CORRELATION_METHODS: List[str] = (
     BASE_CORRELATION_METHODS + 
     ["kendall@10"]
     # [f"{m}@{k}" for m in BASE_CORRELATION_METHODS for k in TOP_K_VALUES]
+    + [COVERAGE_METHOD]
 )
 
 
@@ -33,10 +38,13 @@ def parse_correlation_method(method: str) -> tuple[str, int | None]:
     Examples:
         "kendall" -> ("kendall", None)
         "kendall@10" -> ("kendall", 10)
+        "coverage" -> ("coverage", None)
 
     Raises:
         ValueError: if base method is invalid or k is not a positive integer.
     """
+    if method == COVERAGE_METHOD:
+        return (method, None)
     if "@" in method:
         base, k_str = method.split("@", 1)
         if base not in BASE_CORRELATION_METHODS:
@@ -59,7 +67,7 @@ class CorrelationMethodType(click.ParamType):
             parse_correlation_method(value)
             return value
         except ValueError as e:
-            methods = ", ".join(BASE_CORRELATION_METHODS)
+            methods = ", ".join(BASE_CORRELATION_METHODS + [COVERAGE_METHOD])
             self.fail(
                 f"{e}. Valid: [{methods}] or method@k (e.g., kendall@15).",
                 param,
@@ -312,6 +320,10 @@ class LeaderboardEvaluator():
                 if truth_ranking is None or eval_ranking is None:
                     continue
 
+                if base_method == COVERAGE_METHOD:
+                    correlations[method] = self._coverage(truth_ranking, eval_ranking, eval_diag)
+                    continue
+
                 # Snapshot pre-topk rankings for diagnostics (before any filtering)
                 truth_ranking_pre_topk = dict(truth_ranking)
                 eval_ranking_pre_topk = dict(eval_ranking)
@@ -394,6 +406,19 @@ class LeaderboardEvaluator():
                 a.pop()  # remove the truth value we just added
 
         return a, b
+
+    @staticmethod
+    def _coverage(
+        truth_ranking: Dict[str, float],
+        eval_ranking: Dict[str, float],
+        eval_diag: RankingExtractionDiagnostic,
+    ) -> float:
+        """Fraction of truth runs the judge scored (0.0 if the eval measure is missing
+        and was defaulted to 0). Independent of on_missing, which only decides how
+        the correlations treat the unscored runs."""
+        if not truth_ranking or eval_diag.defaulted:
+            return 0.0
+        return len(truth_ranking.keys() & eval_ranking.keys()) / len(truth_ranking)
 
     def _compute_single_correlation(
         self, truth_ranking: Dict[str, float], eval_ranking: Dict[str, float], base_method: str

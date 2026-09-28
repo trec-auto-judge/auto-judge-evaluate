@@ -163,3 +163,29 @@ class TestEvaluation(unittest.TestCase):
             actual = te.evaluate(judge)[("ORACLE", "ORACLE")]
             self.assertLess(actual["kendall"], 1.0)
             self.assertLess(actual["kendall@10"], 1.0)
+
+    def test_coverage_is_fraction_of_truth_runs_the_judge_scored(self):
+        """coverage separates 'skipped runs' from 'bad ordering': a judge missing
+        1 of 4 runs has coverage 0.75 whatever on_missing is; kendall on the shared
+        runs (on_missing="skip") is still perfect."""
+        missing_one = "\n".join(l for l in EXAMPLE_01.splitlines() if not l.startswith("run_04"))
+        disjoint = EXAMPLE_01.replace("run_", "other_")
+        with TemporaryDirectory() as d:
+            truth = Path(d) / "truth"
+            truth.write_text(EXAMPLE_01)
+            judge = Path(d) / "judge"
+            judge.write_text(missing_one)
+            other = Path(d) / "other"
+            other.write_text(disjoint)
+            for on_missing in ("default", "skip"):
+                te = LeaderboardEvaluator(truth, truth_measures=["ORACLE"], eval_measures=["ORACLE"], truth_format="tot",
+                                          eval_format="tot", on_missing=on_missing,
+                                          correlation_methods=["kendall", "coverage"])
+                actual = te.evaluate(judge)[("ORACLE", "ORACLE")]
+                self.assertAlmostEqual(0.75, actual["coverage"])
+                if on_missing == "skip":
+                    self.assertEqual(1.0, actual["kendall"])
+                self.assertEqual(1.0, te.evaluate(truth)[("ORACLE", "ORACLE")]["coverage"])
+            te = LeaderboardEvaluator(truth, truth_measures=["ORACLE"], eval_measures=["ORACLE"], truth_format="tot",
+                                      eval_format="tot", on_missing="default", correlation_methods=["coverage"])
+            self.assertEqual(0.0, te.evaluate(other)[("ORACLE", "ORACLE")]["coverage"])
