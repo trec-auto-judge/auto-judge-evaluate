@@ -13,7 +13,7 @@ from autojudge_base.click_plus import (
 )
 from autojudge_base.leaderboard import check_format_mismatch
 from autojudge_evaluate.evaluation import EvalResultFormat, LeaderboardEvaluator, CorrelationMethodType, OnMissing
-from autojudge_evaluate.eval_results import load as load_eval_result, load_qrels, EvalResult
+from autojudge_evaluate.eval_results import load as load_eval_result, load_qrels, EvalResult, QRELS_MISSING_CHOICES
 
 
 def persist_output(df: pd.DataFrame, output: Path, out_format: str = "jsonl") -> None:
@@ -67,6 +67,14 @@ def persist_output(df: pd.DataFrame, output: Path, out_format: str = "jsonl") ->
     multiple=True,
     help="Judge qrels file or glob ('topic 0 run_id grade', or 'all 0 run_id grade' for "
          "whole-system grades), evaluated as a leaderboard next to the leaderboard inputs. Repeatable.",
+)
+@click.option(
+    "--qrels-missing",
+    type=click.Choice(QRELS_MISSING_CHOICES),
+    default="graded-only",
+    help="For --eval-qrels: how a (run, topic) the judge did not grade is treated. "
+         "graded-only (default): left out, a run's mean is over its graded topics only. "
+         "zero: counted as grade 0, a run's mean is over all topics in the qrels file.",
 )
 @click.option(
     "--truth-header/--no-truth-header",
@@ -185,6 +193,7 @@ def meta_evaluate(
     truth_header: bool,
     eval_format: EvalResultFormat | None,
     eval_qrels: tuple,
+    qrels_missing: str,
     eval_header: bool,
     truth_drop_aggregate: bool,
     eval_drop_aggregate: bool,
@@ -230,7 +239,7 @@ def meta_evaluate(
     def load_eval_input(path: Path, is_qrels: bool) -> EvalResult:
         """Load one eval input without filtering (for topic/run statistics)."""
         if is_qrels:
-            return load_qrels(path)
+            return load_qrels(path, missing=qrels_missing)
         return load_eval_result(
             path,
             format=eval_format,
@@ -313,6 +322,7 @@ def meta_evaluate(
         run_ids=run_ids_set,
         only_shared_runs=only_shared_runs,
         diagnostics_dir=diagnostics_dir,
+        qrels_missing=qrels_missing,
     )
 
     # Print diagnostic info

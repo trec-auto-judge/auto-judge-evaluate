@@ -65,6 +65,59 @@ def test_load_qrels_as_per_topic_grades_with_mean_aggregate(files):
     assert result.get_value("r2", ALL_TOPIC_ID, QRELS_MEASURE) == pytest.approx(2.0)
 
 
+# r1 is graded 3 on t1 and not graded on t2; r2 is graded 2 on both.
+PARTIAL_QRELS = "t1 0 r1 3\nt1 0 r2 2\nt2 0 r2 2\n"
+
+
+def test_load_qrels_graded_only_averages_over_graded_topics(tmp_path: Path):
+    qrels = tmp_path / "partial.qrels"
+    qrels.write_text(PARTIAL_QRELS)
+    for result in (load_qrels(qrels), load_qrels(qrels, missing="graded-only")):  # default
+        assert result.get_value("r1", "t2", QRELS_MEASURE) is None
+        assert result.get_value("r1", ALL_TOPIC_ID, QRELS_MEASURE) == pytest.approx(3.0)
+        assert result.get_value("r2", ALL_TOPIC_ID, QRELS_MEASURE) == pytest.approx(2.0)
+
+
+def test_load_qrels_zero_counts_ungraded_topic_as_zero(tmp_path: Path):
+    qrels = tmp_path / "partial.qrels"
+    qrels.write_text(PARTIAL_QRELS)
+    result = load_qrels(qrels, missing="zero")
+    assert result.get_value("r1", "t2", QRELS_MEASURE) == 0.0
+    assert result.get_value("r1", ALL_TOPIC_ID, QRELS_MEASURE) == pytest.approx(1.5)
+    assert result.get_value("r2", ALL_TOPIC_ID, QRELS_MEASURE) == pytest.approx(2.0)
+
+
+def test_qrels_missing_setting_changes_leaderboard_correlation(tmp_path: Path, files):
+    """Grades follow the truth order r1 > r2 > r3 > r4, but r1 is not graded on t2.
+    graded-only: r1 mean 3 -> still first, kendall 1.0.
+    zero: r1 mean 1.5 -> falls below r2 (2), kendall < 1."""
+    truth, _ = files
+    qrels = tmp_path / "skips_r1.qrels"
+    qrels.write_text("t1 0 r1 3\nt1 0 r2 2\nt1 0 r3 1\nt1 0 r4 0\n"
+                     "t2 0 r2 2\nt2 0 r3 1\nt2 0 r4 0\n")
+    graded_only = _QrelsEvaluator(truth, truth_format="tot", correlation_methods=["kendall"],
+                                  qrels_missing="graded-only").evaluate(qrels)
+    zero = _QrelsEvaluator(truth, truth_format="tot", correlation_methods=["kendall"],
+                           qrels_missing="zero").evaluate(qrels)
+    assert graded_only[("F1", QRELS_MEASURE)]["kendall"] == pytest.approx(1.0)
+    assert zero[("F1", QRELS_MEASURE)]["kendall"] < 1.0
+
+
+def test_cli_accepts_qrels_missing(files):
+    truth, qrels = files
+    for mode in ("graded-only", "zero"):
+        result = CliRunner().invoke(main, [
+            "meta-evaluate", "--truth-leaderboard", str(truth), "--truth-format", "tot",
+            "--eval-qrels", str(qrels), "--qrels-missing", mode, "--correlation", "kendall",
+        ])
+        assert result.exit_code == 0, result.output
+    result = CliRunner().invoke(main, [
+        "meta-evaluate", "--truth-leaderboard", str(truth), "--truth-format", "tot",
+        "--eval-qrels", str(qrels), "--qrels-missing", "bogus",
+    ])
+    assert result.exit_code != 0
+
+
 def test_per_topic_correlation_averages_over_topics(files):
     truth, qrels = files
     actual = _evaluator(truth, ["kendall_per_topic", "spearman_per_topic"]).evaluate(qrels)

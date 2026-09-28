@@ -10,7 +10,7 @@ Components:
 
 from .eval_result import EvalResult, EvalEntry, MeasureSpecs, ALL_TOPIC_ID, MeasureDtype
 from .builder import EvalResultBuilder
-from .io import load, load_qrels, write, write_by_run, QRELS_MEASURE
+from .io import load, load_qrels, write, write_by_run, QRELS_MEASURE, QrelsMissing, QRELS_MISSING_CHOICES
 
 __all__ = [
     "EvalResult",
@@ -22,6 +22,8 @@ __all__ = [
     "load",
     "load_qrels",
     "QRELS_MEASURE",
+    "QrelsMissing",
+    "QRELS_MISSING_CHOICES",
     "write",
     "write_by_run",
 ]

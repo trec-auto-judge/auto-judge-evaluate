@@ -6,7 +6,7 @@ from typing import Dict, List, Literal, Tuple
 
 import warnings
 
-from autojudge_evaluate.eval_results import load as load_eval_result, load_qrels, EvalResult, ALL_TOPIC_ID
+from autojudge_evaluate.eval_results import load as load_eval_result, load_qrels, EvalResult, ALL_TOPIC_ID, QrelsMissing
 from autojudge_evaluate.correlation_diagnostics import (
     CorrelationIssue,
     RankingExtractionDiagnostic,
@@ -100,6 +100,7 @@ class LeaderboardEvaluator():
         run_ids: set[str] | None = None,
         only_shared_runs: bool = False,
         diagnostics_dir: Path | None = None,
+        qrels_missing: QrelsMissing = "graded-only",
     ):
         self.on_missing = on_missing
         self.truth_leaderboard = truth_leaderboard
@@ -116,6 +117,7 @@ class LeaderboardEvaluator():
         self.run_ids = run_ids  # Explicit run_ids filter, or None = all
         self.only_shared_runs = only_shared_runs  # Filter to common run_ids (truth ∩ eval)
         self.diagnostics_dir = diagnostics_dir  # When set, dump per-method ranking JSONL
+        self.qrels_missing = qrels_missing  # load_qrels: ungraded (run, topic) left out or scored 0
 
         # Lazy: truth_result loaded on first access
         self._truth_result: EvalResult | None = None
@@ -251,7 +253,7 @@ class LeaderboardEvaluator():
         # =======================================================================
         truth_raw = self.truth_result  # Lazily loaded, no filtering
         if is_qrels:
-            eval_raw = load_qrels(Path(eval_file))
+            eval_raw = load_qrels(Path(eval_file), missing=self.qrels_missing)
         else:
             eval_raw = self._load_eval_result(
                 eval_file, self.eval_format, self.eval_has_header, self.on_missing
