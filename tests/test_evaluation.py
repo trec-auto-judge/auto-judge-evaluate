@@ -124,3 +124,68 @@ class TestEvaluation(unittest.TestCase):
             te = LeaderboardEvaluator(leaderboard, truth_measures=["measure-does-not-exist"], eval_measures=["M1"], truth_format="tot", eval_format="tot")
             with self.assertRaises(ValueError):
                 te.evaluate(leaderboard)
+    def test_eval_file_sharing_no_runs_gives_nan_instead_of_crashing(self):
+        """An eval file with no runs in common with the truth yields NaN instead of
+        raising, so meta-evaluating several files is not aborted by one."""
+        import math
+        import warnings
+        disjoint = EXAMPLE_01.replace("run_", "other_")
+        with TemporaryDirectory() as d:
+            truth = Path(d) / "truth"
+            truth.write_text(EXAMPLE_01)
+            other = Path(d) / "other"
+            other.write_text(disjoint)
+            te = LeaderboardEvaluator(truth, truth_measures=["ORACLE"], eval_measures=["ORACLE"], truth_format="tot",
+                                      eval_format="tot", on_missing="default",
+                                      correlation_methods=["kendall", "kendall@10"])
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                actual = te.evaluate(other)
+            # With on_missing="default" every truth run is kept and scored 0 for this
+            # judge, so kendall is NaN (constant eval) and no correlation-issues warning is raised.
+            self.assertTrue(math.isnan(actual[("ORACLE", "ORACLE")]["kendall"]))
+            # The truth itself still evaluates normally afterwards.
+            self.assertEqual(1.0, te.evaluate(truth)[("ORACLE", "ORACLE")]["kendall"])
+
+    def test_missing_run_scores_zero_even_with_top_k_methods(self):
+        """A run the judge left out scores 0 under on_missing="default", also when
+        an @k method is requested (which used to drop it and give a perfect 1.0)."""
+        # run_04 is best in the truth but missing from the judge -> ranked last
+        missing_best = "\n".join(l for l in EXAMPLE_01.splitlines() if not l.startswith("run_04"))
+        with TemporaryDirectory() as d:
+            truth = Path(d) / "truth"
+            truth.write_text(EXAMPLE_01)
+            judge = Path(d) / "judge"
+            judge.write_text(missing_best)
+            te = LeaderboardEvaluator(truth, truth_measures=["ORACLE"], eval_measures=["ORACLE"], truth_format="tot",
+                                      eval_format="tot", on_missing="default",
+                                      correlation_methods=["kendall", "kendall@10"])
+            actual = te.evaluate(judge)[("ORACLE", "ORACLE")]
+            self.assertLess(actual["kendall"], 1.0)
+            self.assertLess(actual["kendall@10"], 1.0)
+
+    def test_coverage_is_fraction_of_truth_runs_the_judge_scored(self):
+        """coverage separates 'skipped runs' from 'bad ordering': a judge missing
+        1 of 4 runs has coverage 0.75 whatever on_missing is; kendall on the shared
+        runs (on_missing="skip") is still perfect."""
+        missing_one = "\n".join(l for l in EXAMPLE_01.splitlines() if not l.startswith("run_04"))
+        disjoint = EXAMPLE_01.replace("run_", "other_")
+        with TemporaryDirectory() as d:
+            truth = Path(d) / "truth"
+            truth.write_text(EXAMPLE_01)
+            judge = Path(d) / "judge"
+            judge.write_text(missing_one)
+            other = Path(d) / "other"
+            other.write_text(disjoint)
+            for on_missing in ("default", "skip"):
+                te = LeaderboardEvaluator(truth, truth_measures=["ORACLE"], eval_measures=["ORACLE"], truth_format="tot",
+                                          eval_format="tot", on_missing=on_missing,
+                                          correlation_methods=["kendall", "coverage"])
+                actual = te.evaluate(judge)[("ORACLE", "ORACLE")]
+                self.assertAlmostEqual(0.75, actual["coverage"])
+                if on_missing == "skip":
+                    self.assertEqual(1.0, actual["kendall"])
+                self.assertEqual(1.0, te.evaluate(truth)[("ORACLE", "ORACLE")]["coverage"])
+            te = LeaderboardEvaluator(truth, truth_measures=["ORACLE"], eval_measures=["ORACLE"], truth_format="tot",
+                                      eval_format="tot", on_missing="default", correlation_methods=["coverage"])
+            self.assertEqual(0.0, te.evaluate(other)[("ORACLE", "ORACLE")]["coverage"])
