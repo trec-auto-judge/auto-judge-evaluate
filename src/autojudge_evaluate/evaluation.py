@@ -1,4 +1,5 @@
 import click
+import json
 import pandas as pd
 import sys
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Dict, List, Literal, Tuple
 import warnings
 
 from autojudge_evaluate.eval_results import load as load_eval_result, load_qrels, EvalResult, ALL_TOPIC_ID, QrelsMissing
+from autojudge_evaluate.agreement import BLAND_ALTMAN_METHODS, bland_altman, rescale, scale_of
 from autojudge_evaluate.correlation_diagnostics import (
     CorrelationIssue,
     RankingExtractionDiagnostic,
@@ -33,6 +35,7 @@ CORRELATION_METHODS: List[str] = (
     # [f"{m}@{k}" for m in BASE_CORRELATION_METHODS for k in TOP_K_VALUES]
     + [COVERAGE_METHOD]
     + PER_TOPIC_METHODS
+    + BLAND_ALTMAN_METHODS
 )
 
 
@@ -44,11 +47,12 @@ def parse_correlation_method(method: str) -> tuple[str, int | None]:
         "kendall@10" -> ("kendall", 10)
         "coverage" -> ("coverage", None)
         "kendall_per_topic" -> ("kendall_per_topic", None)
+        "ba_sys_bias" -> ("ba_sys_bias", None)
 
     Raises:
         ValueError: if base method is invalid or k is not a positive integer.
     """
-    if method in PER_TOPIC_METHODS or method == COVERAGE_METHOD:
+    if method in PER_TOPIC_METHODS or method == COVERAGE_METHOD or method in BLAND_ALTMAN_METHODS:
         return (method, None)
     if "@" in method:
         base, k_str = method.split("@", 1)
@@ -72,7 +76,7 @@ class CorrelationMethodType(click.ParamType):
             parse_correlation_method(value)
             return value
         except ValueError as e:
-            methods = ", ".join(BASE_CORRELATION_METHODS + PER_TOPIC_METHODS + [COVERAGE_METHOD])
+            methods = ", ".join(BASE_CORRELATION_METHODS + PER_TOPIC_METHODS + [COVERAGE_METHOD] + BLAND_ALTMAN_METHODS)
             self.fail(
                 f"{e}. Valid: [{methods}] or method@k (e.g., kendall@15).",
                 param,
@@ -101,6 +105,8 @@ class LeaderboardEvaluator():
         only_shared_runs: bool = False,
         diagnostics_dir: Path | None = None,
         qrels_missing: QrelsMissing = "graded-only",
+        ba_truth_ranges: Dict[str, Tuple[float, float]] | None = None,
+        ba_judge_ranges: Dict[str, Tuple[float, float]] | None = None,
     ):
         self.on_missing = on_missing
         self.truth_leaderboard = truth_leaderboard
@@ -118,6 +124,9 @@ class LeaderboardEvaluator():
         self.only_shared_runs = only_shared_runs  # Filter to common run_ids (truth ∩ eval)
         self.diagnostics_dir = diagnostics_dir  # When set, dump per-method ranking JSONL
         self.qrels_missing = qrels_missing  # load_qrels: ungraded (run, topic) left out or scored 0
+        # measure (or "*") -> (low, high) scale for Bland-Altman, per side
+        self.ba_truth_ranges = ba_truth_ranges or {}
+        self.ba_judge_ranges = ba_judge_ranges or {}
 
         # Lazy: truth_result loaded on first access
         self._truth_result: EvalResult | None = None
@@ -322,9 +331,18 @@ class LeaderboardEvaluator():
 
         for truth_m, eval_m in self.get_measure_pairs(eval_raw):
             correlations = {}
+            ba_stats: Dict[str, float] | None = None  # computed once per measure pair
 
             for method in self.correlation_methods:
                 base_method, top_k = parse_correlation_method(method)
+
+                if base_method in BLAND_ALTMAN_METHODS:
+                    if ba_stats is None:
+                        ba_stats = self._bland_altman(
+                            truth_filtered, eval_filtered, truth_m, eval_m, eval_file.stem
+                        )
+                    correlations[method] = ba_stats[method]
+                    continue
 
                 if base_method in PER_TOPIC_METHODS:
                     correlations[method] = self._per_topic_correlation(
@@ -439,6 +457,100 @@ class LeaderboardEvaluator():
         if not truth_ranking or eval_diag.defaulted:
             return 0.0
         return len(truth_ranking.keys() & eval_ranking.keys()) / len(truth_ranking)
+
+    @staticmethod
+    def _aggregate_values(result: EvalResult, measure: str) -> Dict[str, float]:
+        """run_id -> aggregate value, or {} if the measure has no aggregate rows."""
+        try:
+            return result.get_aggregate_ranking(measure)
+        except ValueError:
+            return {}
+
+    def _bland_altman(
+        self,
+        truth_result: EvalResult,
+        eval_result: EvalResult,
+        truth_m: str,
+        eval_m: str,
+        eval_label: str,
+    ) -> Dict[str, float]:
+        """Bland-Altman headline columns (see agreement.py) at two levels:
+        ``sys`` pairs each run's aggregate scores, ``resp`` each (run, topic) score.
+
+        Missing scores are left out, never filled with 0, whatever on_missing says.
+        Bland-Altman asks whether the scores the judge gave are too high or too low;
+        a made-up 0 is not a score the judge gave and would pull the bias down (a
+        lenient judge that skips responses could look strict). How much the judge
+        skipped is reported by the coverage column instead.
+
+        Both measures are mapped onto 0-1 by their declared scale
+        (--ba-truth-range / --ba-judge-range); if either side has no declared scale
+        the columns are NaN. With diagnostics_dir, per-point rows and the full
+        statistics are written next to the correlation diagnostics.
+        """
+        truth_sys = self._aggregate_values(truth_result, truth_m)
+        eval_sys = self._aggregate_values(eval_result, eval_m)
+        truth_topics = self._topic_values(truth_result, truth_m)
+        eval_topics = self._topic_values(eval_result, eval_m)
+
+        truth_scale = scale_of(truth_m, self.ba_truth_ranges)
+        eval_scale = scale_of(eval_m, self.ba_judge_ranges)
+
+        # (run_id, topic_id or None, truth, judge) per level
+        points = {
+            "sys": [(r, None, truth_sys[r], eval_sys[r]) for r in sorted(truth_sys.keys() & eval_sys.keys())],
+            "resp": [
+                (r, t, truth_runs[r], eval_topics[t][r])
+                for t, truth_runs in sorted(truth_topics.items()) if t in eval_topics
+                for r in sorted(truth_runs.keys() & eval_topics[t].keys())
+            ],
+        }
+
+        out: Dict[str, float] = {}
+        details = []
+        for level, pts in points.items():
+            if truth_scale is None or eval_scale is None:
+                stats = bland_altman([], [])
+                pts = []
+            else:
+                truth_vals = rescale([p[2] for p in pts], truth_scale)
+                eval_vals = rescale([p[3] for p in pts], eval_scale)
+                pts = [(p[0], p[1], tv, ev) for p, tv, ev in zip(pts, truth_vals, eval_vals)]
+                stats = bland_altman(truth_vals, eval_vals)
+            for stat in ("bias", "loa_low", "loa_high"):
+                out[f"ba_{level}_{stat}"] = stats[stat]
+            details.append((level, stats, pts))
+
+        if self.diagnostics_dir is not None:
+            self._dump_bland_altman(eval_label, truth_m, eval_m, truth_scale, eval_scale, details)
+        return out
+
+    def _dump_bland_altman(self, eval_label, truth_m, eval_m, truth_scale, eval_scale, details) -> None:
+        """<diagnostics_dir>/<eval_label>/<truth_m>__<eval_m>/bland_altman.summary.json
+        and bland_altman.points.jsonl (one row per compared item, on the 0-1 scale)."""
+        from autojudge_evaluate.correlation_diagnostics import _safe_path_component
+
+        out_dir = (
+            Path(self.diagnostics_dir)
+            / _safe_path_component(eval_label)
+            / f"{_safe_path_component(truth_m)}__{_safe_path_component(eval_m)}"
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "truth_measure": truth_m,
+            "eval_measure": eval_m,
+            "truth_scale": truth_scale,
+            "eval_scale": eval_scale,
+            "levels": {level: stats for level, stats, _ in details},
+        }
+        (out_dir / "bland_altman.summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        with open(out_dir / "bland_altman.points.jsonl", "w") as f:
+            for level, _, pts in details:
+                for run_id, topic_id, t, e in pts:
+                    f.write(json.dumps({
+                        "level": level, "run_id": run_id, "topic_id": topic_id,
+                        "truth": t, "judge": e, "mean": (t + e) / 2, "diff": e - t,
+                    }) + "\n")
 
     @staticmethod
     def _topic_values(result: EvalResult, measure: str) -> Dict[str, Dict[str, float]]:

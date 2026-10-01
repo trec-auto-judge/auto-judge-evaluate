@@ -14,6 +14,7 @@ from autojudge_base.click_plus import (
 from autojudge_base.leaderboard import check_format_mismatch
 from autojudge_evaluate.evaluation import EvalResultFormat, LeaderboardEvaluator, CorrelationMethodType, OnMissing
 from autojudge_evaluate.eval_results import load as load_eval_result, load_qrels, EvalResult, QRELS_MISSING_CHOICES
+from autojudge_evaluate.agreement import parse_range
 
 
 def persist_output(df: pd.DataFrame, output: Path, out_format: str = "jsonl") -> None:
@@ -75,6 +76,22 @@ def persist_output(df: pd.DataFrame, output: Path, out_format: str = "jsonl") ->
     help="For --eval-qrels: how a (run, topic) the judge did not grade is treated. "
          "graded-only (default): left out, a run's mean is over its graded topics only. "
          "zero: counted as grade 0, a run's mean is over all topics in the qrels file.",
+)
+@click.option(
+    "--ba-truth-range",
+    type=str,
+    multiple=True,
+    help="Scale of a truth measure for the Bland-Altman columns, as MEASURE=LOW:HIGH "
+         "(e.g. f1=0:1), or *=LOW:HIGH for every truth measure without its own entry. Repeatable.",
+)
+@click.option(
+    "--ba-judge-range",
+    type=str,
+    multiple=True,
+    help="Scale of a judge measure (the input leaderboards / --eval-qrels, i.e. an --eval-measure) "
+         "for the Bland-Altman columns, as MEASURE=LOW:HIGH "
+         "(e.g. GRADE=0:3), or *=LOW:HIGH. Repeatable. Both sides are mapped onto 0-1 by their "
+         "scale before comparing; a pair where either side has no scale gets NaN columns.",
 )
 @click.option(
     "--truth-header/--no-truth-header",
@@ -194,6 +211,8 @@ def meta_evaluate(
     eval_format: EvalResultFormat | None,
     eval_qrels: tuple,
     qrels_missing: str,
+    ba_truth_range: tuple,
+    ba_judge_range: tuple,
     eval_header: bool,
     truth_drop_aggregate: bool,
     eval_drop_aggregate: bool,
@@ -230,6 +249,15 @@ def meta_evaluate(
     all_inputs: List[Tuple[Path, bool]] = (
         [(p, False) for p in leaderboard_inputs] + [(p, True) for p in expand(eval_qrels)]
     )
+
+    try:
+        ba_truth_ranges = dict(parse_range(spec) for spec in ba_truth_range)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param_hint="--ba-truth-range")
+    try:
+        ba_judge_ranges = dict(parse_range(spec) for spec in ba_judge_range)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param_hint="--ba-judge-range")
 
     if not all_inputs:
         raise click.ClickException("No input files specified. Use --input, positional arguments or --eval-qrels.")
@@ -323,6 +351,8 @@ def meta_evaluate(
         only_shared_runs=only_shared_runs,
         diagnostics_dir=diagnostics_dir,
         qrels_missing=qrels_missing,
+        ba_truth_ranges=ba_truth_ranges,
+        ba_judge_ranges=ba_judge_ranges,
     )
 
     # Print diagnostic info
