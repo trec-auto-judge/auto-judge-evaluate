@@ -1,5 +1,6 @@
 import click
 import json
+import numpy as np
 import pandas as pd
 import sys
 from pathlib import Path
@@ -9,6 +10,13 @@ import warnings
 
 from autojudge_evaluate.eval_results import load as load_eval_result, load_qrels, EvalResult, ALL_TOPIC_ID, QrelsMissing
 from autojudge_evaluate.agreement import BLAND_ALTMAN_METHODS, bland_altman, rescale, scale_of
+from autojudge_evaluate.significance import (
+    DEFAULT_ALPHA,
+    DEFAULT_TRIALS,
+    DISCPOWER_METHODS,
+    compare as compare_significance,
+    rand_tukey_hsd,
+)
 from autojudge_evaluate.correlation_diagnostics import (
     CorrelationIssue,
     RankingExtractionDiagnostic,
@@ -36,6 +44,7 @@ CORRELATION_METHODS: List[str] = (
     + [COVERAGE_METHOD]
     + PER_TOPIC_METHODS
     + BLAND_ALTMAN_METHODS
+    + DISCPOWER_METHODS
 )
 
 
@@ -48,11 +57,13 @@ def parse_correlation_method(method: str) -> tuple[str, int | None]:
         "coverage" -> ("coverage", None)
         "kendall_per_topic" -> ("kendall_per_topic", None)
         "ba_sys_bias" -> ("ba_sys_bias", None)
+        "dp_judge" -> ("dp_judge", None)
 
     Raises:
         ValueError: if base method is invalid or k is not a positive integer.
     """
-    if method in PER_TOPIC_METHODS or method == COVERAGE_METHOD or method in BLAND_ALTMAN_METHODS:
+    if (method in PER_TOPIC_METHODS or method == COVERAGE_METHOD
+            or method in BLAND_ALTMAN_METHODS or method in DISCPOWER_METHODS):
         return (method, None)
     if "@" in method:
         base, k_str = method.split("@", 1)
@@ -76,7 +87,8 @@ class CorrelationMethodType(click.ParamType):
             parse_correlation_method(value)
             return value
         except ValueError as e:
-            methods = ", ".join(BASE_CORRELATION_METHODS + PER_TOPIC_METHODS + [COVERAGE_METHOD] + BLAND_ALTMAN_METHODS)
+            methods = ", ".join(BASE_CORRELATION_METHODS + PER_TOPIC_METHODS + [COVERAGE_METHOD]
+                                + BLAND_ALTMAN_METHODS + DISCPOWER_METHODS)
             self.fail(
                 f"{e}. Valid: [{methods}] or method@k (e.g., kendall@15).",
                 param,
@@ -107,6 +119,8 @@ class LeaderboardEvaluator():
         qrels_missing: QrelsMissing = "graded-only",
         ba_truth_ranges: Dict[str, Tuple[float, float]] | None = None,
         ba_judge_ranges: Dict[str, Tuple[float, float]] | None = None,
+        dp_trials: int = DEFAULT_TRIALS,
+        dp_alpha: float = DEFAULT_ALPHA,
     ):
         self.on_missing = on_missing
         self.truth_leaderboard = truth_leaderboard
@@ -127,6 +141,11 @@ class LeaderboardEvaluator():
         # measure (or "*") -> (low, high) scale for Bland-Altman, per side
         self.ba_truth_ranges = ba_truth_ranges or {}
         self.ba_judge_ranges = ba_judge_ranges or {}
+        self.dp_trials = dp_trials  # randomised Tukey HSD trials
+        self.dp_alpha = dp_alpha  # significance level for the discpower columns
+        # The truth's test depends only on (measure, runs, topics), so it is reused
+        # across judge files instead of being recomputed for each.
+        self._dp_truth_cache: Dict[Tuple, Tuple] = {}
 
         # Lazy: truth_result loaded on first access
         self._truth_result: EvalResult | None = None
@@ -332,6 +351,7 @@ class LeaderboardEvaluator():
         for truth_m, eval_m in self.get_measure_pairs(eval_raw):
             correlations = {}
             ba_stats: Dict[str, float] | None = None  # computed once per measure pair
+            dp_stats: Dict[str, float] | None = None  # likewise
 
             for method in self.correlation_methods:
                 base_method, top_k = parse_correlation_method(method)
@@ -342,6 +362,14 @@ class LeaderboardEvaluator():
                             truth_filtered, eval_filtered, truth_m, eval_m, eval_file.stem
                         )
                     correlations[method] = ba_stats[method]
+                    continue
+
+                if base_method in DISCPOWER_METHODS:
+                    if dp_stats is None:
+                        dp_stats = self._discpower(
+                            truth_filtered, eval_filtered, truth_m, eval_m, eval_file.stem
+                        )
+                    correlations[method] = dp_stats[method]
                     continue
 
                 if base_method in PER_TOPIC_METHODS:
@@ -550,6 +578,81 @@ class LeaderboardEvaluator():
                     f.write(json.dumps({
                         "level": level, "run_id": run_id, "topic_id": topic_id,
                         "truth": t, "judge": e, "mean": (t + e) / 2, "diff": e - t,
+                    }) + "\n")
+
+    def _discpower(
+        self,
+        truth_result: EvalResult,
+        eval_result: EvalResult,
+        truth_m: str,
+        eval_m: str,
+        eval_label: str,
+    ) -> Dict[str, float]:
+        """Discpower columns (see significance.py) from per-topic scores.
+
+        The randomised Tukey HSD needs a complete topics x runs matrix, so it uses
+        the runs both sides scored and, of their topics, those where every one of
+        these runs has a score on both sides. With fewer than 3 runs or 2 topics the
+        columns are NaN. With diagnostics_dir, one row per run pair (both mean
+        differences and p-values) and a summary are written next to the
+        correlation diagnostics.
+        """
+        nan = {m: float("nan") for m in DISCPOWER_METHODS}
+        truth_topics = self._topic_values(truth_result, truth_m)
+        eval_topics = self._topic_values(eval_result, eval_m)
+        runs = sorted(
+            {r for v in truth_topics.values() for r in v} & {r for v in eval_topics.values() for r in v}
+        )
+        topics = sorted(
+            t for t in truth_topics.keys() & eval_topics.keys()
+            if all(r in truth_topics[t] and r in eval_topics[t] for r in runs)
+        )
+        if len(runs) < 3 or len(topics) < 2:
+            return nan
+
+        truth_matrix = np.array([[truth_topics[t][r] for r in runs] for t in topics])
+        judge_matrix = np.array([[eval_topics[t][r] for r in runs] for t in topics])
+        key = (truth_m, tuple(runs), tuple(topics), self.dp_trials)
+        if key not in self._dp_truth_cache:
+            self._dp_truth_cache[key] = rand_tukey_hsd(truth_matrix, self.dp_trials)
+        truth_diff, truth_p = self._dp_truth_cache[key]
+        judge_diff, judge_p = rand_tukey_hsd(judge_matrix, self.dp_trials)
+        stats = compare_significance(truth_diff, truth_p, judge_diff, judge_p, self.dp_alpha)
+
+        if self.diagnostics_dir is not None:
+            self._dump_discpower(eval_label, truth_m, eval_m, runs, topics,
+                                 truth_diff, truth_p, judge_diff, judge_p, stats)
+        return stats
+
+    def _dump_discpower(self, eval_label, truth_m, eval_m, runs, topics,
+                        truth_diff, truth_p, judge_diff, judge_p, stats) -> None:
+        """<diagnostics_dir>/<eval_label>/<truth_m>__<eval_m>/discpower.summary.json
+        and discpower.pairs.jsonl (one row per run pair)."""
+        from autojudge_evaluate.correlation_diagnostics import _safe_path_component
+
+        out_dir = (
+            Path(self.diagnostics_dir)
+            / _safe_path_component(eval_label)
+            / f"{_safe_path_component(truth_m)}__{_safe_path_component(eval_m)}"
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "truth_measure": truth_m,
+            "eval_measure": eval_m,
+            "n_runs": len(runs),
+            "n_topics": len(topics),
+            "trials": self.dp_trials,
+            "alpha": self.dp_alpha,
+            **{k: float(v) for k, v in stats.items()},
+        }
+        (out_dir / "discpower.summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        with open(out_dir / "discpower.pairs.jsonl", "w") as f:
+            for a in range(len(runs)):
+                for b in range(a + 1, len(runs)):
+                    f.write(json.dumps({
+                        "run_a": runs[a], "run_b": runs[b],
+                        "truth_diff": float(truth_diff[a, b]), "truth_p": float(truth_p[a, b]),
+                        "judge_diff": float(judge_diff[a, b]), "judge_p": float(judge_p[a, b]),
                     }) + "\n")
 
     @staticmethod
