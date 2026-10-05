@@ -15,6 +15,7 @@ from autojudge_base.leaderboard import check_format_mismatch
 from autojudge_evaluate.evaluation import EvalResultFormat, LeaderboardEvaluator, CorrelationMethodType, OnMissing
 from autojudge_evaluate.eval_results import load as load_eval_result, load_qrels, EvalResult, QRELS_MISSING_CHOICES
 from autojudge_evaluate.agreement import parse_range
+from autojudge_evaluate.significance import DEFAULT_ALPHA, DEFAULT_TRIALS
 
 
 def persist_output(df: pd.DataFrame, output: Path, out_format: str = "jsonl") -> None:
@@ -92,6 +93,21 @@ def persist_output(df: pd.DataFrame, output: Path, out_format: str = "jsonl") ->
          "for the Bland-Altman columns, as MEASURE=LOW:HIGH "
          "(e.g. GRADE=0:3), or *=LOW:HIGH. Repeatable. Both sides are mapped onto 0-1 by their "
          "scale before comparing; a pair where either side has no scale gets NaN columns.",
+)
+@click.option(
+    "--dp-trials",
+    type=click.IntRange(min=100),
+    default=DEFAULT_TRIALS,
+    show_default=True,
+    help="Shuffles per randomised Tukey HSD test for the discpower (dp_*) columns. "
+         "Sakai recommends 1000-5000; more is slower but steadier.",
+)
+@click.option(
+    "--dp-alpha",
+    type=click.FloatRange(min=0, max=1, min_open=True, max_open=True),
+    default=DEFAULT_ALPHA,
+    show_default=True,
+    help="Significance level for the discpower (dp_*) columns.",
 )
 @click.option(
     "--truth-header/--no-truth-header",
@@ -213,6 +229,8 @@ def meta_evaluate(
     qrels_missing: str,
     ba_truth_range: tuple,
     ba_judge_range: tuple,
+    dp_trials: int,
+    dp_alpha: float,
     eval_header: bool,
     truth_drop_aggregate: bool,
     eval_drop_aggregate: bool,
@@ -353,6 +371,8 @@ def meta_evaluate(
         qrels_missing=qrels_missing,
         ba_truth_ranges=ba_truth_ranges,
         ba_judge_ranges=ba_judge_ranges,
+        dp_trials=dp_trials,
+        dp_alpha=dp_alpha,
     )
 
     # Print diagnostic info
