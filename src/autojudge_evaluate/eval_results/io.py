@@ -56,6 +56,58 @@ def load(
         return _load_file(path, format, has_header, drop_aggregates, recompute_aggregates, verify, on_missing)
 
 
+QRELS_MEASURE = "QRELS_GRADE"
+
+# How load_qrels treats a (run, topic) the judge did not grade:
+#   "graded-only": leave it out; a run's mean is over its graded topics only.
+#   "zero":        count it as grade 0; a run's mean is over all topics in the file.
+QrelsMissing = Literal["graded-only", "zero"]
+QRELS_MISSING_CHOICES: List[str] = ["graded-only", "zero"]
+
+
+def load_qrels(path: Path, measure: str = QRELS_MEASURE, missing: QrelsMissing = "graded-only") -> EvalResult:
+    """
+    Load a judge's response-level qrels as an EvalResult.
+
+    Each qrels line ``topic_id  0  run_id  grade`` becomes an entry
+    ``(run_id, topic_id, measure, grade)``: the grade the judge gave that run's
+    response for that topic. The ``all`` row is the mean grade per run, so the
+    result works both for per-topic agreement and as a leaderboard.
+
+    ``missing`` sets how a (run, topic) the judge did not grade is treated:
+    ``"graded-only"`` (default) leaves it out, so the mean is over the run's graded
+    topics; ``"zero"`` counts it as grade 0, so the mean is over all topics in the
+    file. Only runs and topics that appear somewhere in the file are known.
+
+    Qrels may also grade a system as a whole with topic ``all``
+    (``all  0  run_id  grade``); when present, those lines are the ``all`` rows
+    as given instead of a computed mean.
+
+    The document column must hold run ids (the starter kit's
+    ``qrels_doc_id: run_id``); qrels keyed by response hash do not match truth
+    run ids.
+    """
+    from autojudge_base.qrels.qrels import read_qrel_file
+
+    rows = read_qrel_file(path).rows
+    has_given_aggregates = any(str(row.topic_id) == ALL_TOPIC_ID for row in rows)
+    builder = EvalResultBuilder(MeasureSpecs.from_single({measure: "float"}))
+    graded = set()
+    for row in rows:
+        builder.add(row.doc_id, str(row.topic_id), measure, float(row.grade))
+        graded.add((row.doc_id, str(row.topic_id)))
+    if missing == "zero" and not has_given_aggregates:
+        # Add grade 0 for each (run, topic) the judge left out, so each run's mean
+        # (and any later recompute) covers all topics in the file.
+        run_ids = {run for run, _ in graded}
+        topic_ids = {topic for _, topic in graded}
+        for run in sorted(run_ids):
+            for topic in sorted(topic_ids):
+                if (run, topic) not in graded:
+                    builder.add(run, topic, measure, 0.0)
+    return builder.build(compute_aggregates=not has_given_aggregates, verify=True, on_missing="ignore")
+
+
 def _load_directory(
     directory: Path,
     format: Format,
