@@ -33,7 +33,67 @@ run_03 M2 all 2
 run_04 M2 all 1
 """
 
+PER_TOPIC_TRUTH = """
+run_01 ORACLE q1 1
+run_02 ORACLE q1 2
+run_03 ORACLE q1 3
+run_04 ORACLE q1 4
+run_01 ORACLE q2 1
+run_02 ORACLE q2 2
+run_03 ORACLE q2 3
+run_04 ORACLE q2 4
+run_01 ORACLE all 9
+run_02 ORACLE all 9
+run_03 ORACLE all 9
+run_04 ORACLE all 9
+"""
+
+PER_TOPIC_EVAL = """
+run_01 M1 q1 1
+run_02 M1 q1 2
+run_03 M1 q1 3
+run_04 M1 q1 4
+run_01 M1 q2 4
+run_02 M1 q2 3
+run_03 M1 q2 2
+run_04 M1 q2 1
+run_01 M1 all 9
+run_02 M1 all 9
+run_03 M1 all 9
+run_04 M1 all 9
+"""
+
+PER_TOPIC_EVAL_SHORT = """
+run_01 M1 q1 1
+run_02 M1 q1 2
+run_01 M1 all 9
+run_02 M1 all 9
+"""
+
+
 class TestEvaluation(unittest.TestCase):
+    def test_evaluate_per_topic(self):
+        """Agreement on q1 and reversal on q2, read from the per-topic rows only."""
+        with TemporaryDirectory() as d:
+            truth = Path(d) / "truth"
+            truth.write_text(PER_TOPIC_TRUTH)
+            evaluated = Path(d) / "evaluated"
+            evaluated.write_text(PER_TOPIC_EVAL)
+            te = LeaderboardEvaluator(truth, truth_measures=["ORACLE"], eval_measures=["M1"], truth_format="tot", eval_format="tot", correlation_methods=["tauap_b"])
+            actual = te.evaluate_per_topic(evaluated)
+            self.assertEqual({('ORACLE', 'M1'): {'q1': {'tauap_b': 1.0}, 'q2': {'tauap_b': -1.0}}}, actual)
+
+    def test_evaluate_per_topic_raises_on_too_few_runs(self):
+        """A topic with fewer than 3 aligned runs raises, as evaluate() does."""
+        with TemporaryDirectory() as d:
+            truth = Path(d) / "truth"
+            truth.write_text(PER_TOPIC_TRUTH)
+            evaluated = Path(d) / "evaluated"
+            evaluated.write_text(PER_TOPIC_EVAL_SHORT)
+            te = LeaderboardEvaluator(truth, truth_measures=["ORACLE"], eval_measures=["M1"], truth_format="tot", eval_format="tot", correlation_methods=["tauap_b"], only_shared_runs=True)
+            with self.assertRaises(ValueError):
+                te.evaluate_per_topic(evaluated)
+
     def test_correlation_is_perfect_for_identical_leaderboards(self):
         with TemporaryDirectory() as d:
             expected = {('ORACLE', 'ORACLE'): {'kendall': 1.0, 'pearson': 1.0, 'spearman': 1.0, 'tauap_b': 1.0}}

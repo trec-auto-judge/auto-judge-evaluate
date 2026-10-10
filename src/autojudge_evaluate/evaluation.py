@@ -1,4 +1,5 @@
 import click
+import copy
 import pandas as pd
 import sys
 from pathlib import Path
@@ -357,6 +358,36 @@ class LeaderboardEvaluator():
             warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
         return ret
+
+    def evaluate_per_topic(
+        self,
+        eval_file: Path,
+    ) -> Dict[Tuple[str, str], Dict[str, Dict[str, float]]]:
+        """
+        Correlate the per-topic system rankings of truth and evaluated result.
+
+        Runs evaluate() once per topic, with the topic filter narrowed to that
+        topic, so that the aggregate ranking evaluate() correlates is the topic's
+        own ranking. Returns a dict keyed by (truth_measure, eval_measure) whose
+        values map topic_id -> {method: correlation}. A topic with fewer than
+        3 aligned runs raises, as evaluate() does on the aggregate. Diagnostics
+        dumps are disabled for the per-topic runs.
+        """
+        evaluated = self._load_eval_result(
+            eval_file, self.eval_format, self.eval_has_header, self.on_missing
+        )
+        topics = sorted(self.truth_result.topic_ids & evaluated.topic_ids)
+        if self.topic_ids is not None:
+            topics = [t for t in topics if t in self.topic_ids]
+
+        per_topic: Dict[Tuple[str, str], Dict[str, Dict[str, float]]] = {}
+        for topic in topics:
+            single = copy.copy(self)
+            single.topic_ids = {topic}
+            single.diagnostics_dir = None
+            for pair, correlations in single.evaluate(eval_file).items():
+                per_topic.setdefault(pair, {})[topic] = correlations
+        return per_topic
 
     def _align_rankings(
         self, truth_ranking: Dict[str, float], eval_ranking: Dict[str, float]
