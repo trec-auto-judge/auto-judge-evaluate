@@ -19,7 +19,7 @@ from autojudge_base import LeaderboardFormat
 # TODO: Consider unifying with leaderboard.OnMissing which uses "fix_aggregate" instead of "skip"
 OnMissing = Literal["error", "warn", "skip", "default"]
 EvalResultFormat = LeaderboardFormat
-BASE_CORRELATION_METHODS = ["kendall", "pearson", "spearman", "tauap_b"]
+BASE_CORRELATION_METHODS = ["kendall", "pearson", "spearman", "tauap_b", "tau_gap"]
 TOP_K_VALUES = [10]
 CORRELATION_METHODS: List[str] = (
     BASE_CORRELATION_METHODS + 
@@ -411,8 +411,10 @@ class LeaderboardEvaluator():
 
             self._handle_missing(msg)
 
-        # Include all systems from ground truth
-        for system in truth_systems:
+        # Include all systems from ground truth, in a fixed order: tau_gap breaks
+        # ties in the evaluated scores by position, so the order must not depend
+        # on set iteration.
+        for system in sorted(truth_systems):
             a.append(float(truth_ranking[system]))
             if system in eval_ranking:
                 b.append(float(eval_ranking[system]))
@@ -432,6 +434,8 @@ class LeaderboardEvaluator():
 
         if base_method == "tauap_b":
             return tauap_b(a, b)
+        elif base_method == "tau_gap":
+            return tau_gap(a, b)       # asymmetric: truth gaps, evaluated ordering
         else:
             return correlation(a, b, base_method)
 
@@ -451,6 +455,14 @@ def correlation(a, b, method):
 
 def tauap_b(a, b):
     from autojudge_evaluate.pyircore import tauap_b as method
+
+    _check_input_or_raise(a, b)
+    return method(a, b)
+
+
+def tau_gap(a, b):
+    """tau_GAP with truth gaps from ``a`` and the ordering from ``b``."""
+    from autojudge_evaluate.tau_gap import tau_gap as method
 
     _check_input_or_raise(a, b)
     return method(a, b)
